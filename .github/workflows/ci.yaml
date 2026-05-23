@@ -236,6 +236,24 @@ jobs:
           users: {}
           YAML
 
+      - name: Pull bridge image (with retry against ghcr transient denies)
+        run: |
+          set -euo pipefail
+          image='${{ needs.build-image.outputs.image }}'
+          # ghcr.io intermittently returns "denied: denied" on freshly-pushed
+          # multi-arch manifests for a few seconds after the push. Re-login
+          # and retry up to 6 times with backoff before giving up.
+          for i in 1 2 3 4 5 6; do
+            if docker pull "$image"; then
+              echo "pulled after $i attempt(s)"; exit 0
+            fi
+            echo "pull failed; re-authenticating and retrying in $((i*5))s"
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            sleep $((i*5))
+          done
+          echo "ERROR: docker pull never succeeded"
+          exit 1
+
       - name: Launch bridge on the forge network
         run: |
           set -euo pipefail
