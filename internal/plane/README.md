@@ -89,8 +89,16 @@ func VerifySignature(secret string, headers http.Header, body []byte) error
 func Parse(headers http.Header, body []byte) (*Event, error)
 func VerifyAndParse(secret string, headers http.Header, body []byte) (*Event, error)
 
-type Client struct { BaseURL, WorkspaceSlug, APIKey string; HTTPClient *http.Client }
+type Client struct {
+    BaseURL, WorkspaceSlug, APIKey, UserAgent string
+    HTTPClient *http.Client
+}
 func NewClient(baseURL, workspaceSlug, apiKey string, hc *http.Client) *Client
+
+func (c *Client) CreateIssue(ctx context.Context, projectID string, req CreateIssueRequest) (*WorkItem, error)
+func (c *Client) UpdateIssue(ctx context.Context, projectID, issueID string, req UpdateIssueRequest) (*WorkItem, error)
+func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*WorkItem, error)
+func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]State, error)
 ```
 
 Sentinel errors:
@@ -100,6 +108,69 @@ Sentinel errors:
 - `ErrMissingEventHeader`
 - `ErrUnsupportedEvent`
 - `ErrMalformedPayload`
+- `ErrNotFound` — returned by `GetIssueByExternalRef` when no work item
+  matches the `(source, externalID)` pair. This is the normal "we have
+  not yet mirrored this forge issue" case; callers should treat it as a
+  signal to create rather than as a failure.
+
+## Client (outbound REST)
+
+`Client` speaks Plane's "v1" REST API and is the bridge's outbound write
+path. All four methods take a `context.Context`, set
+`Authorization: Bearer <APIKey>`, `Accept: application/json`,
+`User-Agent: <Client.UserAgent or "plane-forge-bridge">`, and
+`Content-Type: application/json` on bodies. Responses are size-capped at
+4 MiB; non-2xx responses become `*APIError` with up to 4 KiB of the
+response body preserved for diagnosis.
+
+| Method                   | HTTP   | Path                                                                          | Returns                |
+| ------------------------ | ------ | ----------------------------------------------------------------------------- | ---------------------- |
+| `CreateIssue`            | POST   | `/workspaces/{slug}/projects/{pid}/issues/`                                   | `*WorkItem`            |
+| `UpdateIssue`            | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem`            |
+| `GetIssueByExternalRef`  | GET    | `/workspaces/{slug}/projects/{pid}/issues/?external_source=…&external_id=…`   | `*WorkItem` / `ErrNotFound` |
+| `ListProjectStates`      | GET    | `/workspaces/{slug}/projects/{pid}/states/`                                   | `[]State`              |
+
+### Error model
+
+- `ErrNotFound` — the "not yet mirrored" signal from
+  `GetIssueByExternalRef`. Use `errors.Is(err, plane.ErrNotFound)`.
+- `*APIError` — any other non-2xx response. `errors.As(err, &apiErr)`
+  exposes `StatusCode`, `Method`, `Path`, and the truncated `Body`.
+
+### Plane API notes (from research at implementation time)
+
+These are the contract details we relied on; they came from reading the
+upstream source at `makeplane/plane` rather than the docs site, which
+under-specifies the list endpoint:
+
+1. **Filter parameter names.** Plane's work-item list endpoint accepts
+   `external_id` and `external_source` as query parameters. When both
+   are present the view short-circuits to `Issue.objects.get(...)` and
+   returns the bare serialized object (HTTP 200) — not a paginated
+   `{"results": [...]}` envelope. A miss raises `DoesNotExist` which
+   DRF turns into HTTP 404. `GetIssueByExternalRef` therefore treats
+   404 as `ErrNotFound`. Source:
+   `apps/api/plane/api/views/issue.py`, `IssueListCreateAPIEndpoint.get`,
+   lines around the `request.GET.get("external_id")` /
+   `request.GET.get("external_source")` block. As a belt-and-braces
+   guard the client also returns `ErrNotFound` if a 200 ever arrives
+   with an empty `id` field, so a future Plane-side change to the
+   pagination contract won't silently return zero-value WorkItems.
+2. **State list pagination.** `/states/` is paginated through Plane's
+   `BasePaginator`, which wraps rows in
+   `{"results": [...], "next_cursor": ..., ...}`. `ListProjectStates`
+   decodes only `results`; we read the first page only because Plane
+   projects rarely have more than a handful of states. Source:
+   `apps/api/plane/utils/paginator.py`.
+3. **Authentication header.** Plane's API supports two auth schemes:
+   `X-Api-Key: <token>` for personal/workspace API tokens and
+   `Authorization: Bearer <token>` for OAuth access tokens. The
+   bridge sends the Bearer form per the project spec; if a deployment
+   uses a long-lived API key against the public Plane.so SaaS that
+   only accepts `X-Api-Key`, the `Client` will need a follow-up to
+   add that header alongside (or instead of) `Authorization`.
+4. **Trailing slashes are mandatory.** Plane's URLConf does not redirect
+   missing trailing slashes; the client constructs every path with one.
 
 ## Open questions
 
@@ -123,9 +194,10 @@ them block the parse/verify happy path but each is a known unknown:
    capture shows the nested form.
 4. **No comment_deleted fixture.** Added the kind for symmetry; we
    should capture a real payload before relying on it.
-5. **REST API client.** `Client` is a stub; method surface to be
-   designed alongside the v1 issue create/update/close translation
-   step.
+5. **REST API client extras.** `Client` covers the v1 issue
+   create/update/lookup + state list surface (see "Client (outbound
+   REST)" above). Comment create/update on the Plane side is still
+   to come.
 
 ## Fixtures
 
