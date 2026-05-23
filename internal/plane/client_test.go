@@ -639,6 +639,175 @@ func TestDeleteComment_APIError(t *testing.T) {
 	}
 }
 
+func TestListProjectLabels_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "results": [
+                {"id":"l1","name":"bug","color":"#ff0000","description":"defects"},
+                {"id":"l2","name":"enhancement","color":"#00ff00"}
+            ]
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListProjectLabels(context.Background(), "proj-1")
+	if err != nil {
+		t.Fatalf("ListProjectLabels: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if want := "/workspaces/acme/projects/proj-1/labels/"; gotPath != want {
+		t.Errorf("path = %q, want %q (trailing slash is mandatory)", gotPath, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("labels = %+v, want 2 rows", got)
+	}
+	if got[0].ID != "l1" || got[0].Name != "bug" || got[0].Color != "#ff0000" || got[0].Description != "defects" {
+		t.Errorf("labels[0] = %+v, want {ID:l1 Name:bug Color:#ff0000 Description:defects}", got[0])
+	}
+	if got[1].ID != "l2" || got[1].Name != "enhancement" || got[1].Description != "" {
+		t.Errorf("labels[1] = %+v, want {ID:l2 Name:enhancement Description:\"\"}", got[1])
+	}
+}
+
+func TestListProjectLabels_Empty(t *testing.T) {
+	t.Parallel()
+
+	// Plane returns the paginated envelope with an empty "results" array
+	// when a project has no labels. We decode that into a nil slice — the
+	// zero value of []Label — because Go's json package leaves a missing
+	// or empty JSON array as a nil slice and we don't allocate one
+	// ourselves. Callers should use len(got) rather than == nil.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"results":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListProjectLabels(context.Background(), "proj-1")
+	if err != nil {
+		t.Fatalf("ListProjectLabels: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("labels = %+v, want empty", got)
+	}
+}
+
+func TestListProjectLabels_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.ListProjectLabels(context.Background(), "proj-1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if apiErr.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", apiErr.Method)
+	}
+}
+
+func TestCreateProjectLabel_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   CreateLabelRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode req body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Label{
+			ID:          "label-uuid",
+			Name:        gotBody.Name,
+			Color:       gotBody.Color,
+			Description: gotBody.Description,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.CreateProjectLabel(context.Background(), "proj-1", CreateLabelRequest{
+		Name:  "bug",
+		Color: "#ff0000",
+	})
+	if err != nil {
+		t.Fatalf("CreateProjectLabel: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if want := "/workspaces/acme/projects/proj-1/labels/"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotBody.Name != "bug" || gotBody.Color != "#ff0000" {
+		t.Errorf("posted body = %+v, want Name=bug Color=#ff0000", gotBody)
+	}
+	if got.ID != "label-uuid" || got.Name != "bug" || got.Color != "#ff0000" {
+		t.Errorf("Label = %+v, want {ID:label-uuid Name:bug Color:#ff0000}", got)
+	}
+}
+
+func TestCreateProjectLabel_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":"name is required"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.CreateProjectLabel(context.Background(), "proj-1", CreateLabelRequest{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want 422", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "name is required") {
+		t.Errorf("Body = %q, want upstream message preserved", apiErr.Body)
+	}
+}
+
 // keys returns the sorted keys of m for use in error messages.
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))

@@ -100,6 +100,8 @@ func (c *Client) UpdateIssue(ctx context.Context, projectID, issueID string, req
 func (c *Client) GetIssue(ctx context.Context, projectID, issueID string) (*WorkItem, error)
 func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*WorkItem, error)
 func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]State, error)
+func (c *Client) ListProjectLabels(ctx context.Context, projectID string) ([]Label, error)
+func (c *Client) CreateProjectLabel(ctx context.Context, projectID string, req CreateLabelRequest) (*Label, error)
 func (c *Client) CreateComment(ctx context.Context, projectID, issueID string, req CreateCommentRequest) (*CommentResponse, error)
 func (c *Client) UpdateComment(ctx context.Context, projectID, issueID, commentID string, req UpdateCommentRequest) (*CommentResponse, error)
 func (c *Client) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
@@ -135,6 +137,8 @@ response body preserved for diagnosis.
 | `GetIssue`               | GET    | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem` / `ErrNotFound` |
 | `GetIssueByExternalRef`  | GET    | `/workspaces/{slug}/projects/{pid}/issues/?external_source=…&external_id=…`   | `*WorkItem` / `ErrNotFound` |
 | `ListProjectStates`      | GET    | `/workspaces/{slug}/projects/{pid}/states/`                                   | `[]State`              |
+| `ListProjectLabels`      | GET    | `/workspaces/{slug}/projects/{pid}/labels/`                                   | `[]Label`              |
+| `CreateProjectLabel`     | POST   | `/workspaces/{slug}/projects/{pid}/labels/`                                   | `*Label`               |
 | `CreateComment`          | POST   | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/`                    | `*CommentResponse`     |
 | `UpdateComment`          | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `*CommentResponse`     |
 | `DeleteComment`          | DELETE | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `error` / `ErrNotFound` |
@@ -197,7 +201,22 @@ under-specifies the list endpoint:
    `apps/api/plane/api/middleware/api_authentication.py`.
 4. **Trailing slashes are mandatory.** Plane's URLConf does not redirect
    missing trailing slashes; the client constructs every path with one.
-5. **Comment endpoints.** The work-item detail endpoint is
+5. **Label endpoints.** Labels are scoped to a project and share Plane's
+   `BasePaginator` envelope on list (`{"results": [...], ...}`), so
+   `ListProjectLabels` decodes only the rows — same pattern as
+   `ListProjectStates`. Two quirks worth recording in case a caller needs
+   to handle them: (a) Plane returns **HTTP 409 Conflict** (not 422) when a
+   label with the same name already exists in the project, and the
+   response body includes the existing label's `id` so a "get-or-create"
+   caller can recover without a second list; (b) the `LabelDetailAPIEndpoint`
+   subclasses `LabelListCreateAPIEndpoint` so update/delete reuse the same
+   queryset filter (`project__archived_at__isnull=True`) — archived
+   projects' labels are invisible to the API. Source:
+   `apps/api/plane/api/urls/label.py` (the two `path(...)` entries) and
+   `apps/api/plane/api/views/issue.py` (`LabelListCreateAPIEndpoint` and
+   `LabelDetailAPIEndpoint`; the 409 branches live in the `post` body and
+   the `IntegrityError` except clause).
+6. **Comment endpoints.** The work-item detail endpoint is
    `GET /workspaces/{slug}/projects/{pid}/issues/{iid}/` and comments
    are nested under the work item:
    `POST/GET .../issues/{iid}/comments/` and

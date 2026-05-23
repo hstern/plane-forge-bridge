@@ -192,6 +192,35 @@ func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]Sta
 	return out.Results, nil
 }
 
+// ListProjectLabels returns the labels defined on a project. Used by
+// callers that need to translate a forge label name to a Plane label UUID
+// (or discover that no such label exists yet so they can create it). The
+// endpoint is paginated through Plane's BasePaginator; we read the first
+// page only, by the same reasoning as ListProjectStates — Plane projects
+// rarely carry more than a handful of labels.
+func (c *Client) ListProjectLabels(ctx context.Context, projectID string) ([]Label, error) {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/labels/", c.WorkspaceSlug, projectID)
+	var out labelsListResponse
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Results, nil
+}
+
+// CreateProjectLabel creates a new label scoped to projectID. Returns the
+// created Label including its server-assigned UUID. Plane responds with
+// HTTP 409 (not 422) when a label with the same name already exists in the
+// project; callers that want "get-or-create" should list first or inspect
+// the *APIError.StatusCode on the way out.
+func (c *Client) CreateProjectLabel(ctx context.Context, projectID string, req CreateLabelRequest) (*Label, error) {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/labels/", c.WorkspaceSlug, projectID)
+	var out Label
+	if err := c.do(ctx, http.MethodPost, path, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // do is the shared request/response plumbing. body may be nil; out may be
 // nil. Query params are added to the URL if q is non-nil.
 //
