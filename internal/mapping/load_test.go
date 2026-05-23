@@ -358,6 +358,129 @@ func TestLoadFromReader_EnvOverrides(t *testing.T) {
 	}
 }
 
+// TestLoad_LinkWithProjectIdentifierAndPRStateMap covers the happy path
+// for the optional project_identifier and pr_state_map fields.
+func TestLoad_LinkWithProjectIdentifierAndPRStateMap(t *testing.T) {
+	r := bytes.NewReader(fixture(t, "link_with_pr_state_map.yaml"))
+	got, err := LoadFromReader(r, fullEnv(nil))
+	if err != nil {
+		t.Fatalf("LoadFromReader: %v", err)
+	}
+	if len(got.Links) != 1 {
+		t.Fatalf("len(Links) = %d, want 1", len(got.Links))
+	}
+	l := got.Links[0]
+	if l.ProjectIdentifier != "PFB" {
+		t.Errorf("ProjectIdentifier = %q, want PFB", l.ProjectIdentifier)
+	}
+	wantPR := map[string]string{
+		"opened": "In Progress",
+		"merged": "Done",
+		"closed": "Cancelled",
+	}
+	if len(l.PRStateMap) != len(wantPR) {
+		t.Fatalf("PRStateMap = %#v, want %#v", l.PRStateMap, wantPR)
+	}
+	for k, v := range wantPR {
+		if l.PRStateMap[k] != v {
+			t.Errorf("PRStateMap[%q] = %q, want %q", k, l.PRStateMap[k], v)
+		}
+	}
+}
+
+// linkYAMLWith returns a complete YAML config whose single link has the
+// supplied extra field block grafted onto it. The block is inserted
+// verbatim at the same indentation as the other link fields.
+func linkYAMLWith(extra string) string {
+	return `listen: ":8080"
+log_level: info
+
+forge:
+  base_url: https://git.example.org
+  token_env: PFB_FORGE_TOKEN
+  webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+
+plane:
+  base_url: https://app.plane.so/api/v1
+  workspace_slug: my-workspace
+  api_key_env: PFB_PLANE_API_KEY
+  webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+
+bridge_bot:
+  forge_username: plane-bridge
+  plane_member_id: 00000000-0000-0000-0000-000000000000
+
+links:
+  - forge_repo: my-org/my-repo
+    plane_project_id: 11111111-1111-1111-1111-111111111111
+` + extra
+}
+
+// TestLoadInvalidProjectIdentifier exercises every documented rejection
+// path: lowercase, hyphens, too long.
+func TestLoadInvalidProjectIdentifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "lowercase", value: "pfb"},
+		{name: "hyphens", value: "P-FB"},
+		{name: "too long", value: "ABCDEFGHIJK"}, // 11 chars
+		{name: "leading digit", value: "1PFB"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			y := linkYAMLWith("    project_identifier: " + tc.value + "\n")
+			_, err := LoadFromReader(strings.NewReader(y), fullEnv(nil))
+			if !errors.Is(err, ErrConfigInvalid) {
+				t.Fatalf("err = %v, want wrap of ErrConfigInvalid", err)
+			}
+			if !strings.Contains(err.Error(), "project_identifier") {
+				t.Errorf("err %q missing field name", err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.value) {
+				t.Errorf("err %q missing offending value %q", err.Error(), tc.value)
+			}
+		})
+	}
+}
+
+// TestLoadInvalidPRStateMapKey verifies that an unrecognised action key
+// in pr_state_map is rejected with the key named in the message.
+func TestLoadInvalidPRStateMapKey(t *testing.T) {
+	y := linkYAMLWith("    pr_state_map:\n      weird: \"X\"\n")
+	_, err := LoadFromReader(strings.NewReader(y), fullEnv(nil))
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("err = %v, want wrap of ErrConfigInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "weird") {
+		t.Errorf("err %q missing bad key", err.Error())
+	}
+	if !strings.Contains(err.Error(), "pr_state_map") {
+		t.Errorf("err %q missing field name", err.Error())
+	}
+}
+
+// TestLoadOmittedFields_Defaults is a regression guard: a link without
+// the new optional fields still loads cleanly and the fields default to
+// their zero values.
+func TestLoadOmittedFields_Defaults(t *testing.T) {
+	r := bytes.NewReader(fixture(t, "valid.yaml"))
+	got, err := LoadFromReader(r, fullEnv(nil))
+	if err != nil {
+		t.Fatalf("LoadFromReader: %v", err)
+	}
+	if len(got.Links) != 1 {
+		t.Fatalf("len(Links) = %d, want 1", len(got.Links))
+	}
+	if got.Links[0].ProjectIdentifier != "" {
+		t.Errorf("ProjectIdentifier = %q, want empty", got.Links[0].ProjectIdentifier)
+	}
+	if got.Links[0].PRStateMap != nil {
+		t.Errorf("PRStateMap = %#v, want nil", got.Links[0].PRStateMap)
+	}
+}
+
 // Sanity check: io.Reader contract — Resolved is independent of the
 // reader instance after Load returns.
 func TestLoadFromReader_ReaderIsDrained(t *testing.T) {

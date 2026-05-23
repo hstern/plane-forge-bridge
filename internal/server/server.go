@@ -27,6 +27,7 @@ import (
 type Translator interface {
 	HandleForgeIssue(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
 	HandleForgeComment(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
+	HandleForgePullRequest(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
 	HandlePlaneComment(ctx context.Context, evt *plane.Event) (*pfbsync.Outcome, error)
 }
 
@@ -111,6 +112,9 @@ func (s *Server) handleForge(w http.ResponseWriter, r *http.Request) {
 		case isForgeCommentEvent(evt.Kind):
 			s.dispatchForgeComment(w, r, evt)
 			return
+		case isForgePullRequestEvent(evt.Kind):
+			s.dispatchForgePullRequest(w, r, evt)
+			return
 		}
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -159,6 +163,42 @@ func (s *Server) dispatchForgeComment(w http.ResponseWriter, r *http.Request, ev
 		s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.CommentID)
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) dispatchForgePullRequest(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
+	outcome, terr := s.translator.HandleForgePullRequest(r.Context(), evt)
+	if terr != nil {
+		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge pull_request)",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("err", terr.Error()),
+		)
+		http.Error(w, "translator error", http.StatusInternalServerError)
+		return
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge pull_request translated",
+		slog.String("delivery_id", evt.DeliveryID),
+		slog.String("action", actionString(outcome.Action)),
+		slog.String("work_item_id", outcome.WorkItemID),
+		slog.String("reason", outcome.Reason),
+	)
+	if outcome.WorkItemID != "" {
+		s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.WorkItemID)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// isForgePullRequestEvent reports whether a forge event is a PR-lifecycle
+// event the PR translator handles. pull_request_review currently flows
+// through too — sync skips it with a deferred-handling reason.
+func isForgePullRequestEvent(k forge.EventKind) bool {
+	switch k {
+	case forge.EventPullRequestOpened, forge.EventPullRequestEdited,
+		forge.EventPullRequestClosed, forge.EventPullRequestReopened,
+		forge.EventPullRequestReview:
+		return true
+	default:
+		return false
+	}
 }
 
 // isForgeIssueEvent reports whether a forge event is an issue-lifecycle event.

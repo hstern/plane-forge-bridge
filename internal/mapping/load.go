@@ -23,6 +23,21 @@ var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 // one separator. Forge repo paths use this canonical form.
 var repoRE = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
+// projectIdentifierRE matches a Plane project's short uppercase
+// identifier (e.g. "PFB" in PFB-123). Letters and digits only, must
+// start with a letter, max 10 chars.
+var projectIdentifierRE = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
+
+// validPRStateActions is the set of recognised pr_state_map keys. The
+// values themselves are arbitrary plane state names — typos there are
+// caught at runtime by the state-name lookup.
+var validPRStateActions = map[string]struct{}{
+	"opened":   {},
+	"merged":   {},
+	"closed":   {},
+	"reviewed": {},
+}
+
 // validLogLevels is the set of log levels accepted in the YAML and in
 // the PFB_LOG_LEVEL override.
 var validLogLevels = map[string]struct{}{
@@ -155,6 +170,14 @@ func validate(cfg *Config) error {
 		}
 		if !uuidRE.MatchString(l.PlaneProjectID) {
 			return fmt.Errorf("%w: links[%d].plane_project_id %q: not a UUID", ErrConfigInvalid, i, l.PlaneProjectID)
+		}
+		if l.ProjectIdentifier != "" && !projectIdentifierRE.MatchString(l.ProjectIdentifier) {
+			return fmt.Errorf("%w: links[%d].project_identifier %q: must match %s", ErrConfigInvalid, i, l.ProjectIdentifier, projectIdentifierRE)
+		}
+		for action := range l.PRStateMap {
+			if _, ok := validPRStateActions[action]; !ok {
+				return fmt.Errorf("%w: links[%d].pr_state_map key %q: must be one of opened|merged|closed|reviewed", ErrConfigInvalid, i, action)
+			}
 		}
 	}
 

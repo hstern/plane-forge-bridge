@@ -36,6 +36,7 @@ import (
 type PlaneClient interface {
 	GetIssue(ctx context.Context, projectID, issueID string) (*plane.WorkItem, error)
 	GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*plane.WorkItem, error)
+	GetIssueBySequenceID(ctx context.Context, projectIdentifier string, sequenceID int) (*plane.WorkItem, error)
 	CreateIssue(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssue(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStates(ctx context.Context, projectID string) ([]plane.State, error)
@@ -692,4 +693,188 @@ func (e *Engine) handlePlaneCommentCreated(ctx context.Context, evt *plane.Event
 		CommentID:  strconv.FormatInt(c.ID, 10),
 		Link:       link,
 	}, nil
+}
+
+// reasonPRReviewDeferred is the Outcome.Reason for pull_request_review
+// events. Step 9 v1 ships only the open/merged/closed transitions; review
+// state → work-item state will land in a later step when the requirements
+// firm up (does "approved" advance to "In Review"? "In QA"? operator
+// preference, no canonical mapping).
+const reasonPRReviewDeferred = "review event handling deferred to a later step"
+
+// HandleForgePullRequest translates forge pull_request.* events into a
+// state update on the linked Plane work item.
+//
+// Flow:
+//
+//  1. linkForRepo(evt.Repo.FullName); skip if no link configured.
+//  2. Skip if PR automation is not opted into on this link
+//     (link.ProjectIdentifier or link.PRStateMap empty).
+//  3. parsePRRef on title + body + head branch ref; skip if no ref found.
+//  4. plane.GetIssueBySequenceID; skip on ErrNotFound (operator typoed the
+//     ref or the work item was deleted — not a bridge failure).
+//  5. Map evt.Kind + evt.PullRequest.Merged → PRStateMap key:
+//     opened/reopened → "opened", closed+merged → "merged",
+//     closed+unmerged → "closed", anything else (edited, review) → skip.
+//  6. ResolveStateID on the mapped state name. Lookup miss surfaces as an
+//     error — that's an operator config bug we shouldn't paper over.
+//  7. UpdateIssue with only StateID set. The PATCH is unconditional even
+//     when the state already matches; the optimisation (skip on no-op)
+//     can land later when we have a benchmark to justify it.
+//
+// Outcome.WorkItemID is the resolved plane work item ID on ActionUpdated.
+// On every skip path, Outcome.Reason names the specific reason so
+// operators can tell "config gap" apart from "no match in this PR" in
+// the logs.
+func (e *Engine) HandleForgePullRequest(ctx context.Context, evt *forge.Event) (*Outcome, error) {
+	if evt == nil {
+		return nil, errors.New("sync: nil event")
+	}
+
+	link := e.linkForRepo(evt.Repo.FullName)
+	if link == nil {
+		e.Log.Debug("skipping forge PR event: no link configured",
+			"repo", evt.Repo.FullName, "kind", evt.Kind, "delivery", evt.DeliveryID)
+		return &Outcome{Action: ActionSkipped, Reason: "no link configured for repo"}, nil
+	}
+
+	// PR automation is opt-in per link. A link with no ProjectIdentifier
+	// or an empty PRStateMap means the operator has not asked the bridge
+	// to move work-item state on PR events for this repo — issue/comment
+	// translation still works, but PRs are a no-op.
+	if link.ProjectIdentifier == "" || len(link.PRStateMap) == 0 {
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: "no PR automation configured for this link",
+			Link:   link,
+		}, nil
+	}
+
+	// pull_request_review is the one branch that isn't a state-affecting
+	// PR action under step 9 — review events are deferred. We check it
+	// before parsing the ref so the skip reason is "review deferred"
+	// rather than "no ref found" when the review payload happens to lack
+	// a ref. Same for plain edited.
+	if evt.Kind == forge.EventPullRequestReview {
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: reasonPRReviewDeferred,
+			Link:   link,
+		}, nil
+	}
+
+	if evt.PullRequest == nil {
+		return nil, fmt.Errorf("sync: %s with nil PullRequest", evt.Kind)
+	}
+
+	seq, ok := parsePRRef(
+		link.ProjectIdentifier,
+		evt.PullRequest.Title,
+		evt.PullRequest.Body,
+		evt.PullRequest.Head.Ref,
+	)
+	if !ok {
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: fmt.Sprintf("no [%s-N] ref found in PR title/body or branch name", link.ProjectIdentifier),
+			Link:   link,
+		}, nil
+	}
+
+	actionKey, ok := prActionKey(evt.Kind, evt.PullRequest.Merged)
+	if !ok {
+		// EventPullRequestEdited and anything else not in the
+		// open/reopen/close set: edits shouldn't move state (the title or
+		// body changed, not the PR's lifecycle). Skip with a reason
+		// pointing at the action so the log line is useful.
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: fmt.Sprintf("PR action %q does not map to a state transition", evt.Kind),
+			Link:   link,
+		}, nil
+	}
+
+	stateName, ok := link.PRStateMap[actionKey]
+	if !ok || stateName == "" {
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: fmt.Sprintf("no state transition configured for action %q on this link", actionKey),
+			Link:   link,
+		}, nil
+	}
+
+	// The plane endpoint takes the project's short identifier code (e.g.
+	// "PFB"), not the project UUID. See plane.Client.GetIssueBySequenceID.
+	wi, err := e.Client.GetIssueBySequenceID(ctx, link.ProjectIdentifier, seq)
+	if errors.Is(err, plane.ErrNotFound) {
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: fmt.Sprintf("[%s-%d] does not exist on the configured Plane project", link.ProjectIdentifier, seq),
+			Link:   link,
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sync: lookup work item by sequence id: %w", err)
+	}
+
+	// ResolveStateID surfaces the lookup miss as an error — the operator
+	// has named a Plane state in pr_state_map that doesn't exist on the
+	// project. We don't want to silently no-op.
+	stateID, err := e.resolvePRStateName(ctx, link, stateName)
+	if err != nil {
+		return nil, fmt.Errorf("sync: resolve PR state %q: %w", stateName, err)
+	}
+
+	req := plane.UpdateIssueRequest{StateID: &stateID}
+	updated, err := e.Client.UpdateIssue(ctx, link.PlaneProjectID, wi.ID, req)
+	if err != nil {
+		return nil, fmt.Errorf("sync: update PR-driven state: %w", err)
+	}
+	e.Log.Info("updated plane work item state from forge PR",
+		"repo", evt.Repo.FullName, "pr", evt.PullRequest.Number,
+		"work_item", updated.ID, "sequence", seq,
+		"action", actionKey, "state", stateName, "delivery", evt.DeliveryID)
+	return &Outcome{
+		Action:     ActionUpdated,
+		WorkItemID: updated.ID,
+		Link:       link,
+	}, nil
+}
+
+// prActionKey maps a (Kind, Merged) pair to the PRStateMap key. Returns
+// ok=false for actions that should NOT move state (edited, anything
+// unknown). pull_request_review is filtered out by the caller before this
+// runs.
+func prActionKey(kind forge.EventKind, merged bool) (string, bool) {
+	switch kind {
+	case forge.EventPullRequestOpened:
+		return "opened", true
+	case forge.EventPullRequestReopened:
+		return "opened", true
+	case forge.EventPullRequestClosed:
+		if merged {
+			return "merged", true
+		}
+		return "closed", true
+	default:
+		return "", false
+	}
+}
+
+// resolvePRStateName resolves a PR-state name (the value side of
+// link.PRStateMap) to a Plane state UUID through the shared state cache.
+// Unlike ResolveStateID this does NOT short-circuit on missing names —
+// the caller has already confirmed PRStateMap has an entry, so a state
+// that isn't on the project is a hard config bug we surface.
+func (e *Engine) resolvePRStateName(ctx context.Context, link *mapping.Link, name string) (string, error) {
+	states, err := e.listStates(ctx, link.PlaneProjectID)
+	if err != nil {
+		return "", fmt.Errorf("list states for project %s: %w", link.PlaneProjectID, err)
+	}
+	for _, s := range states {
+		if s.Name == name {
+			return s.ID, nil
+		}
+	}
+	return "", fmt.Errorf("state %q not found in project %s", name, link.PlaneProjectID)
 }

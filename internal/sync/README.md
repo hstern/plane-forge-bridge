@@ -1,8 +1,9 @@
 # internal/sync
 
 Bidirectional translation between parsed forge webhook events and Plane
-REST API calls. Covers issues (step 6), comments (step 7), and labels +
-state-map coverage on issue writes (step 8) in the
+REST API calls. Covers issues (step 6), comments (step 7), labels +
+state-map coverage on issue writes (step 8), and PR/branch → work-item
+state automation (step 9) in the
 [build order](../../AGENTS.md#build-order).
 
 ## What it does
@@ -12,9 +13,10 @@ right REST call on the OTHER side, idempotently, with the loop-break
 marker baked into every body it writes.
 
 ```
-forge webhook → server (HMAC + LRU) → sync.Engine.HandleForgeIssue   → plane REST
-                                    → sync.Engine.HandleForgeComment → plane REST
-plane webhook → server (HMAC + LRU) → sync.Engine.HandlePlaneComment → forge REST
+forge webhook → server (HMAC + LRU) → sync.Engine.HandleForgeIssue       → plane REST
+                                    → sync.Engine.HandleForgeComment     → plane REST
+                                    → sync.Engine.HandleForgePullRequest → plane REST
+plane webhook → server (HMAC + LRU) → sync.Engine.HandlePlaneComment     → forge REST
 ```
 
 The engine is a pure translator. It does **not** own the loop-break LRU —
@@ -29,6 +31,7 @@ invariant in [AGENTS.md](../../AGENTS.md#architecture-invariants).
 type PlaneClient interface {
     GetIssue(ctx, projectID, issueID string) (*plane.WorkItem, error)
     GetIssueByExternalRef(ctx, projectID, source, externalID string) (*plane.WorkItem, error)
+    GetIssueBySequenceID(ctx, projectID string, sequenceID int) (*plane.WorkItem, error)
     CreateIssue(ctx, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
     UpdateIssue(ctx, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
     ListProjectStates(ctx, projectID string) ([]plane.State, error)
@@ -66,6 +69,7 @@ type Engine struct {
 func NewEngine(c PlaneClient, cfg *mapping.Resolved, log *slog.Logger) *Engine
 func (e *Engine) HandleForgeIssue(ctx context.Context, evt *forge.Event) (*Outcome, error)
 func (e *Engine) HandleForgeComment(ctx context.Context, evt *forge.Event) (*Outcome, error)
+func (e *Engine) HandleForgePullRequest(ctx context.Context, evt *forge.Event) (*Outcome, error)
 func (e *Engine) HandlePlaneComment(ctx context.Context, evt *plane.Event) (*Outcome, error)
 
 type Outcome struct {
@@ -142,6 +146,99 @@ path.
 | `EventCommentUpdated`       | `ActionSkipped` — see "Open questions" below                                                              |
 | `EventCommentDeleted`       | `ActionSkipped` — see "Open questions" below                                                              |
 | anything else               | `ActionSkipped` ("unsupported")                                                                          |
+
+### forge → plane PR/branch state (`HandleForgePullRequest`)
+
+Step 9. Pull request lifecycle events nudge the linked Plane work item's
+state — opening a PR moves it to "In Progress", merging to "Done",
+closing without merge to "Cancelled", etc. The exact state names are
+operator-supplied via `link.pr_state_map`.
+
+PR automation is **opt-in per link**: a link with no `project_identifier`
+or empty `pr_state_map` produces `ActionSkipped` with
+`Reason="no PR automation configured for this link"` and zero API calls.
+This keeps existing issue/comment-only deployments unaffected.
+
+Decision tree (after `linkForRepo` matches and PR automation is enabled):
+
+| evt.Kind                | Merged | Behaviour                                                                              |
+|-------------------------|--------|----------------------------------------------------------------------------------------|
+| `PullRequestOpened`     | n/a    | parse ref → `GetIssueBySequenceID` → `UpdateIssue` with `pr_state_map["opened"]`       |
+| `PullRequestReopened`   | n/a    | as above, also keyed on `"opened"` — reopening lands in the same lane as opening       |
+| `PullRequestClosed`     | true   | parse ref → `GetIssueBySequenceID` → `UpdateIssue` with `pr_state_map["merged"]`       |
+| `PullRequestClosed`     | false  | parse ref → `GetIssueBySequenceID` → `UpdateIssue` with `pr_state_map["closed"]`       |
+| `PullRequestEdited`     | n/a    | `ActionSkipped`, `Reason="PR action \"…\" does not map to a state transition"`         |
+| `PullRequestReview`     | n/a    | `ActionSkipped`, `Reason="review event handling deferred to a later step"`             |
+| anything else           | n/a    | `ActionSkipped` (same "no state transition" reason)                                    |
+
+Skip reasons (each surfaces a specific operator-facing failure mode so
+the logs are actionable):
+
+- `no link configured for repo` — repo not in `links:`.
+- `no PR automation configured for this link` — link present but no
+  `project_identifier` + `pr_state_map`.
+- `no [<IDENT>-N] ref found in PR title/body or branch name` — the PR
+  doesn't reference a Plane work item we can target.
+- `[<IDENT>-N] does not exist on the configured Plane project` — operator
+  typoed the ref, the work item was deleted, or the link points at a
+  different project than the PR thinks.
+- `no state transition configured for action "<action>" on this link` —
+  the action key isn't present in `pr_state_map`.
+- `PR action "<kind>" does not map to a state transition` — edit /
+  unknown action.
+- `review event handling deferred to a later step` — `pull_request_review`.
+
+A misconfigured state NAME (mapping pointing at a state Plane doesn't
+have) returns an **error**, not a skip — that's a config bug the
+operator should see loudly. Updates issue a PATCH unconditionally even
+when the current state already matches the target; the no-op
+optimisation can land later behind a benchmark.
+
+### PR ref grammar
+
+Two surfaces, tried in this order; the first hit wins:
+
+| Source       | Pattern (regex)                            | Case sensitivity            |
+|--------------|--------------------------------------------|-----------------------------|
+| PR title     | `` \[<IDENT>-([0-9]+)\] ``                 | identifier exact            |
+| PR body      | `` \[<IDENT>-([0-9]+)\] `` (same regex)    | identifier exact            |
+| Head branch  | ``(?i)^<ident>-([0-9]+)(?:-\|$)``          | identifier case-insensitive |
+
+- `<IDENT>` is the link's `project_identifier` (e.g. `PFB`), regex-escaped.
+- Title and body use the canonical UPPERCASE form Plane displays —
+  `[pfb-42]` does NOT match in the title/body. Branch names follow
+  the lowercase-with-hyphens convention, so the head-branch surface is
+  case-insensitive on the identifier.
+- The digit run must be followed by either `-` (a slug suffix) or
+  end-of-string. `pfb-42abc` does NOT match as 42 — that prevents
+  accidental routing when the slug accidentally collides with digits.
+- If multiple matches exist in the title or body (or in the branch),
+  the FIRST match in source order wins.
+- Sequence IDs that overflow `int` (e.g. a 21-digit literal in the body)
+  are rejected so they don't wrap to garbage; parsing falls through to
+  the next source.
+- The identifier is required to be the SAME identifier configured on
+  the link — we deliberately don't scan for arbitrary `[XXX-N]` so we
+  can't mis-route to the wrong Plane project.
+
+### Supported `pr_state_map` keys
+
+| Key      | Triggered by                                                              |
+|----------|---------------------------------------------------------------------------|
+| `opened` | `pull_request.opened`, `pull_request.reopened`                            |
+| `merged` | `pull_request.closed` with `merged=true`                                  |
+| `closed` | `pull_request.closed` with `merged=false`                                 |
+| `reviewed` | reserved — review-event handling is deferred (see below)                |
+
+The loader rejects any other keys; this lets operators learn about typos
+at config-load time rather than via a missing PR transition six weeks
+later. The `reviewed` key is accepted by the loader (so configs are
+forward-compatible) but does nothing in step 9: review-state →
+work-item-state mapping needs more thought (does "approved" advance to
+"In Review"? "In QA"? operator preference, no canonical mapping). When
+that question firms up, `HandleForgePullRequest` will switch from
+returning `Reason="review event handling deferred to a later step"` to
+applying the configured transition.
 
 Repos with no link in config short-circuit to `ActionSkipped` with
 `Reason="no link configured for repo"` and zero API calls — the bridge
@@ -337,11 +434,13 @@ and operators can wait out the TTL. Options if we need to do better:
 ## Not yet implemented
 
 This package covers issues (step 6), the forward/backward comment paths
-(step 7), and label translation + complete state-map coverage on issue
-writes (step 8). Remaining gaps live in later steps:
+(step 7), label translation + complete state-map coverage on issue
+writes (step 8), and PR/branch → work-item state automation (step 9).
+Remaining gaps live in later steps:
 
-- **PR / branch → work-item state automation** (step 9) — pull request
-  events are short-circuited as `ActionSkipped` for now.
+- **PR review state → work-item state** — `pull_request_review` events
+  are short-circuited as `ActionSkipped` for now (see the PR section
+  above). The `reviewed` key in `pr_state_map` is reserved.
 - **Plane → forge issue translation** (step 10) — a separate handler that
   the server will dispatch from `/plane/webhook`. The forge-side label
   helpers (`ListRepoLabels` / `CreateRepoLabel`) are wired into the

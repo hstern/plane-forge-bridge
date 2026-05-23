@@ -126,6 +126,41 @@ func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, e
 	return &out, nil
 }
 
+// GetIssueBySequenceID looks up a work item by its (sequence_id, project)
+// pair. The sequence_id is the small integer Plane shows in the UI (e.g.
+// the "123" in PFB-123). Returns ErrNotFound when no matching work item
+// exists.
+//
+// Plane's public v1 API has no "?sequence_id=" filter on the per-project
+// issue list endpoint — the only short-circuit filters there are
+// external_id+external_source (see GetIssueByExternalRef). The single
+// available lookup-by-sequence path is the workspace-level work item
+// endpoint, which is keyed by the project's *short identifier code* (the
+// "PFB" in "PFB-123") rather than the project UUID. The first argument
+// is therefore the project's identifier code, NOT the project UUID
+// accepted by the other Client methods. Plane returns the bare
+// serialized object on a hit (HTTP 200) or 404 on a miss — same shape
+// as GetIssueByExternalRef.
+func (c *Client) GetIssueBySequenceID(ctx context.Context, projectIdentifier string, sequenceID int) (*WorkItem, error) {
+	path := fmt.Sprintf("/workspaces/%s/work-items/%s-%d/", c.WorkspaceSlug, projectIdentifier, sequenceID)
+	var out WorkItem
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	// Defensive: same belt-and-braces guard as GetIssueByExternalRef — if
+	// Plane ever changes the contract to return a 200 with an empty body
+	// instead of a 404, surface that as ErrNotFound rather than a
+	// zero-value WorkItem.
+	if out.ID == "" {
+		return nil, ErrNotFound
+	}
+	return &out, nil
+}
+
 // GetIssue returns a single work item by its Plane UUID. Useful for the
 // plane→forge direction: when a comment event arrives, the bridge looks
 // up the work item to read its external_source / external_id and figure

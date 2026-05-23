@@ -31,7 +31,9 @@ secret, and the loader reads it at startup. See
 | `bridge_bot.plane_member_id`   | UUID              | (none — YAML only)                 |
 | `links[].forge_repo`           | `owner/repo`      | (none — YAML only)                 |
 | `links[].plane_project_id`     | UUID              | (none — YAML only)                 |
+| `links[].project_identifier`   | short uppercase ID (optional) | (none — YAML only)     |
 | `links[].state_map`            | map[string]string | (none — YAML only)                 |
+| `links[].pr_state_map`         | map[string]string (optional) | (none — YAML only)      |
 | `users`                        | map[string]UUID   | (none — YAML only)                 |
 | `idemp.lru_capacity`           | positive int      | (none — YAML only)                 |
 
@@ -80,6 +82,16 @@ The loader returns an error wrapping one of the package sentinels:
     whitespace).
   - Each `links[].plane_project_id` and each `users[*]` value parses as
     a UUID.
+  - `links[].project_identifier`, when set, matches
+    `^[A-Z][A-Z0-9]{0,9}$` — uppercase letters and digits only, starts
+    with a letter, at most 10 characters. When unset, PR ref parsing
+    bypasses the link.
+  - `links[].pr_state_map` keys, when set, must each be one of
+    `opened|merged|closed|reviewed`. The values are plane state names
+    resolved at runtime through the same lookup used by `state_map`, so
+    typos in values surface as runtime warnings rather than load
+    failures. Enables the PR → work-item state automation (build step
+    9).
   - `idemp.lru_capacity` defaults to 4096 if zero; must be positive.
 - `ErrSecretMissing` — one of the env vars named in
   `*_env` fields resolves to the empty string.
@@ -92,9 +104,11 @@ package mapping
 type Config struct { /* YAML shape, decoded as-is */ }
 type Resolved struct { /* validated config with secrets pulled in */ }
 type Link struct {
-    ForgeRepo      string
-    PlaneProjectID string
-    StateMap       map[string]string
+    ForgeRepo         string
+    PlaneProjectID    string
+    ProjectIdentifier string            // optional, e.g. "PFB"
+    StateMap          map[string]string
+    PRStateMap        map[string]string // optional, keys: opened|merged|closed|reviewed
 }
 
 // Load reads path, applies PFB_* overrides, validates, and resolves

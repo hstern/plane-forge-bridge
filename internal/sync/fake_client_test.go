@@ -27,6 +27,7 @@ type fakeClient struct {
 
 	GetIssueFunc              func(ctx context.Context, projectID, issueID string) (*plane.WorkItem, error)
 	GetIssueByExternalRefFunc func(ctx context.Context, projectID, source, externalID string) (*plane.WorkItem, error)
+	GetIssueBySequenceIDFunc  func(ctx context.Context, projectID string, sequenceID int) (*plane.WorkItem, error)
 	CreateIssueFunc           func(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssueFunc           func(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStatesFunc     func(ctx context.Context, projectID string) ([]plane.State, error)
@@ -38,6 +39,7 @@ type fakeClient struct {
 
 	Gets                    []getCall
 	GetsByID                []getByIDCall
+	GetsBySeq               []seqLookupCall
 	Creates                 []createCall
 	Updates                 []updateCall
 	Lists                   []string
@@ -56,6 +58,11 @@ type labelCreateCall struct {
 type getByIDCall struct {
 	ProjectID string
 	IssueID   string
+}
+
+type seqLookupCall struct {
+	ProjectID  string
+	SequenceID int
 }
 
 type commentCreateCall struct {
@@ -101,6 +108,17 @@ func (f *fakeClient) GetIssue(ctx context.Context, projectID, issueID string) (*
 	f.mu.Unlock()
 	if fn != nil {
 		return fn(ctx, projectID, issueID)
+	}
+	return nil, plane.ErrNotFound
+}
+
+func (f *fakeClient) GetIssueBySequenceID(ctx context.Context, projectID string, sequenceID int) (*plane.WorkItem, error) {
+	f.mu.Lock()
+	f.GetsBySeq = append(f.GetsBySeq, seqLookupCall{ProjectID: projectID, SequenceID: sequenceID})
+	fn := f.GetIssueBySequenceIDFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, sequenceID)
 	}
 	return nil, plane.ErrNotFound
 }
