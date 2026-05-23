@@ -1,0 +1,75 @@
+# plane-forge-bridge example configuration.
+#
+# Copy this file, edit the placeholders, and pass the path with --config
+# or via the PFB_CONFIG environment variable. Connection settings and the
+# *names* of the env vars holding secrets can also be overridden by
+# PFB_* environment variables (see internal/mapping/README.md).
+
+# HTTP listen address in host:port form. Empty host means "all
+# interfaces". Override with PFB_LISTEN.
+listen: ":8080"
+
+# slog level: debug | info | warn | error. Override with PFB_LOG_LEVEL.
+log_level: info
+
+forge:
+  # Base URL of the Forgejo / Gitea instance, including scheme.
+  # Override with PFB_FORGE_BASE_URL.
+  base_url: https://git.example.org
+
+  # Name of the environment variable that holds the forge API token.
+  # The loader reads $PFB_FORGE_TOKEN at startup; the token itself is
+  # never stored in this file. Override the *name* with
+  # PFB_FORGE_TOKEN_ENV.
+  token_env: PFB_FORGE_TOKEN
+
+  # Name of the env var holding the HMAC-SHA256 webhook secret used to
+  # verify inbound X-Gitea-Signature headers. Override with
+  # PFB_FORGE_WEBHOOK_SECRET_ENV.
+  webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+
+plane:
+  # Base URL of the Plane API. Override with PFB_PLANE_BASE_URL.
+  base_url: https://app.plane.example/api/v1
+
+  # Plane workspace slug. Override with PFB_PLANE_WORKSPACE_SLUG.
+  workspace_slug: my-workspace
+
+  # Name of the env var holding the Plane API key. Override the name
+  # with PFB_PLANE_API_KEY_ENV.
+  api_key_env: PFB_PLANE_API_KEY
+
+  # Name of the env var holding the Plane webhook HMAC secret. Override
+  # the name with PFB_PLANE_WEBHOOK_SECRET_ENV.
+  webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+
+bridge_bot:
+  # Forge account used to author events on behalf of unmapped users.
+  # Comments/descriptions still note the real author in the body.
+  forge_username: plane-bridge
+
+  # Plane member UUID used for the same purpose on the Plane side.
+  # Replace the all-zeroes placeholder with the actual bot member ID.
+  plane_member_id: 00000000-0000-0000-0000-000000000000
+
+# Repo <-> Plane project pairs. One entry per linked pair. The
+# state_map is consulted case-insensitively at lookup time and may
+# differ between pairs (e.g. different teams use different state names).
+links:
+  - forge_repo: my-org/my-repo
+    plane_project_id: 11111111-1111-1111-1111-111111111111
+    state_map:
+      open: Todo
+      closed: Done
+
+# Static forge-username -> Plane member UUID map. Unmapped forge users
+# are posted as bridge_bot above.
+users:
+  alice: 22222222-2222-2222-2222-222222222222
+  bob:   33333333-3333-3333-3333-333333333333
+
+# Loop-break LRU sizing. The marker on outbound writes is the durable
+# defense; this LRU catches the case where the marker was stripped.
+# Defaults to 4096 if unset.
+idemp:
+  lru_capacity: 4096
