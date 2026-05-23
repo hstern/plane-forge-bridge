@@ -965,3 +965,165 @@ func TestClient_AuthorizationToken(t *testing.T) {
 		t.Errorf("Authorization = %q, want exactly %q (not Bearer)", gotAuth, "token test-token")
 	}
 }
+
+func TestSearchUsers_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	// Unlike the bare-array list endpoints (ListRepoLabels), /users/search
+	// wraps its results in a `{data: [...], ok: bool}` envelope. This test
+	// pins that contract — if the client ever stops unwrapping the
+	// envelope, the decoded slice would silently be empty.
+	var (
+		gotMethod string
+		gotPath   string
+		gotQuery  string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"data": [
+				{"id": 1, "login": "alice", "full_name": "Alice", "email": "alice@example.com"},
+				{"id": 2, "login": "bob",   "full_name": "Bob",   "email": "bob@example.com"}
+			],
+			"ok": true
+		}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.SearchUsers(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("SearchUsers: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if want := "/api/v1/users/search"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if want := "q=alice&limit=50"; gotQuery != want {
+		t.Errorf("query = %q, want %q", gotQuery, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(users) = %d, want 2", len(got))
+	}
+	if got[0].ID != 1 || got[0].Login != "alice" || got[0].Email != "alice@example.com" {
+		t.Errorf("users[0] = %+v, want {ID:1 Login:alice Email:alice@example.com ...}", got[0])
+	}
+	if got[1].ID != 2 || got[1].Login != "bob" || got[1].Email != "bob@example.com" {
+		t.Errorf("users[1] = %+v, want {ID:2 Login:bob Email:bob@example.com ...}", got[1])
+	}
+}
+
+func TestSearchUsers_Empty(t *testing.T) {
+	t.Parallel()
+
+	// `{data: [], ok: true}` with no matches must return a non-nil empty
+	// slice so callers can range over it without a nil check. The
+	// identity resolver leans on this — len(got) == 0 means "no forge
+	// user matches".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data": [], "ok": true}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.SearchUsers(context.Background(), "nobody")
+	if err != nil {
+		t.Fatalf("SearchUsers: %v", err)
+	}
+	if got == nil {
+		t.Fatal("got = nil, want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(users) = %d, want 0 (got %+v)", len(got), got)
+	}
+
+	// And a 200 with `ok:false` (observed when the search index is
+	// rebuilding) must also collapse to an empty slice, not an error.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data": null, "ok": false}`)
+	}))
+	t.Cleanup(srv2.Close)
+
+	c2 := newTestClient(t, srv2)
+	got2, err := c2.SearchUsers(context.Background(), "nobody")
+	if err != nil {
+		t.Fatalf("SearchUsers (ok:false): %v", err)
+	}
+	if got2 == nil {
+		t.Fatal("got = nil, want non-nil empty slice on ok:false")
+	}
+	if len(got2) != 0 {
+		t.Errorf("len(users) = %d, want 0 on ok:false (got %+v)", len(got2), got2)
+	}
+}
+
+func TestSearchUsers_QueryEscaped(t *testing.T) {
+	t.Parallel()
+
+	// The query can legally contain '@' (email lookups) and spaces
+	// (full-name lookups). They must be URL-escaped in the raw query
+	// string so the forge sees the unescaped value after its own decode.
+	var gotRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRawQuery = r.URL.RawQuery
+		// Also confirm the parser-decoded value round-trips.
+		if got := r.URL.Query().Get("q"); got != "alice smith@example.com" {
+			t.Errorf("decoded q = %q, want %q", got, "alice smith@example.com")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data": [], "ok": true}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	if _, err := c.SearchUsers(context.Background(), "alice smith@example.com"); err != nil {
+		t.Fatalf("SearchUsers: %v", err)
+	}
+
+	// url.QueryEscape encodes ' ' as '+' and '@' as '%40'; both are
+	// valid percent-encodings of the query-string character set per
+	// RFC 3986 §3.4 + HTML form rules, and net/url decodes both back to
+	// the original. Pinning this guards against accidental switches to
+	// PathEscape (which leaves '@' untouched) or raw concatenation.
+	if want := "q=alice+smith%40example.com&limit=50"; gotRawQuery != want {
+		t.Errorf("raw query = %q, want %q", gotRawQuery, want)
+	}
+}
+
+func TestSearchUsers_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"db is down"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.SearchUsers(context.Background(), "alice")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "db is down") {
+		t.Errorf("Body = %q, want it to include the upstream message", apiErr.Body)
+	}
+	if apiErr.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", apiErr.Method)
+	}
+}

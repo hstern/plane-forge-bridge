@@ -94,6 +94,7 @@ func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentI
 func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
 func (c *Client) ListRepoLabels(ctx context.Context, owner, repo string) ([]Label, error)
 func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req CreateLabelRequest) (*Label, error)
+func (c *Client) SearchUsers(ctx context.Context, query string) ([]User, error)
 ```
 
 | Method            | HTTP   | Path                                                       | Returns                  |
@@ -106,6 +107,7 @@ func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req Cr
 | `DeleteComment`   | DELETE | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `nil` / `ErrNotFound`    |
 | `ListRepoLabels`  | GET    | `/api/v1/repos/{owner}/{repo}/labels?page=1&limit=50`      | `[]Label`                |
 | `CreateRepoLabel` | POST   | `/api/v1/repos/{owner}/{repo}/labels`                      | `*Label`                 |
+| `SearchUsers`     | GET    | `/api/v1/users/search?q={query}&limit=50`                  | `[]User`                 |
 
 Request bodies:
 
@@ -142,6 +144,13 @@ Forge list endpoints return a bare JSON array, NOT a `{results: [...]}`
 envelope (that's Plane's convention). `ListRepoLabels` decodes straight
 into `[]Label`. Pagination is via `page` + `limit` query params; v1
 requests the first 50 labels, which covers any realistic repo.
+
+The one exception is `/users/search`: it returns a `{data: [...], ok:
+bool}` envelope instead of a bare array. `SearchUsers` unwraps it
+internally — if you ever bypass the method and call `do` directly for
+this path, decoding into a bare `[]User` will silently yield zero
+results. A 200 with `ok:false` (observed when the forge's search index
+is rebuilding) is treated as zero results, not an error.
 
 The comment endpoints today only accept `body`; the request types stay
 as structs (rather than `map[string]string`) so future optional fields
