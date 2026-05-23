@@ -99,6 +99,7 @@ func (c *Client) CreateIssue(ctx context.Context, projectID string, req CreateIs
 func (c *Client) UpdateIssue(ctx context.Context, projectID, issueID string, req UpdateIssueRequest) (*WorkItem, error)
 func (c *Client) GetIssue(ctx context.Context, projectID, issueID string) (*WorkItem, error)
 func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*WorkItem, error)
+func (c *Client) GetIssueBySequenceID(ctx context.Context, projectID string, sequenceID int) (*WorkItem, error)
 func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]State, error)
 func (c *Client) ListProjectLabels(ctx context.Context, projectID string) ([]Label, error)
 func (c *Client) CreateProjectLabel(ctx context.Context, projectID string, req CreateLabelRequest) (*Label, error)
@@ -136,6 +137,7 @@ response body preserved for diagnosis.
 | `UpdateIssue`            | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem`            |
 | `GetIssue`               | GET    | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem` / `ErrNotFound` |
 | `GetIssueByExternalRef`  | GET    | `/workspaces/{slug}/projects/{pid}/issues/?external_source=…&external_id=…`   | `*WorkItem` / `ErrNotFound` |
+| `GetIssueBySequenceID`   | GET    | `/workspaces/{slug}/work-items/{project_identifier}-{sequence_id}/`           | `*WorkItem` / `ErrNotFound` |
 | `ListProjectStates`      | GET    | `/workspaces/{slug}/projects/{pid}/states/`                                   | `[]State`              |
 | `ListProjectLabels`      | GET    | `/workspaces/{slug}/projects/{pid}/labels/`                                   | `[]Label`              |
 | `CreateProjectLabel`     | POST   | `/workspaces/{slug}/projects/{pid}/labels/`                                   | `*Label`               |
@@ -228,6 +230,28 @@ under-specifies the list endpoint:
    `apps/api/plane/api/serializers/issue.py` (`IssueCommentSerializer`,
    which is also the serializer Plane uses for the webhook payload — so
    the REST and webhook comment shapes match field-for-field).
+
+7. **Sequence-ID lookup.** Plane's UI displays each work item as
+   `<PROJECT_IDENTIFIER>-<SEQUENCE_ID>` (e.g. `PFB-123`), but the public
+   v1 list endpoint at `/workspaces/{slug}/projects/{pid}/issues/` does
+   **not** accept a `?sequence_id=` filter — only `external_id` +
+   `external_source` short-circuit there. The only public endpoint that
+   looks up by sequence_id is `WorkspaceIssueAPIEndpoint`, mounted at
+   both `/workspaces/{slug}/work-items/{project_identifier}-{issue_identifier}/`
+   (current) and the deprecated `/workspaces/{slug}/issues/{project_identifier}-{issue_identifier}/`
+   alias. The view executes `Issue.objects.get(workspace__slug=slug,
+   project__identifier=project_identifier, sequence_id=issue_identifier)`
+   and returns the bare serialized object on hit (HTTP 200) or 404 on
+   miss — same response shape as `GetIssueByExternalRef`. Because the
+   lookup keys on the project's *short identifier code* (the "PFB" in
+   "PFB-123"), the `projectID` parameter to `GetIssueBySequenceID` is
+   the identifier string, not the project UUID accepted by the other
+   methods. As a belt-and-braces guard the client also returns
+   `ErrNotFound` if a 200 ever arrives with an empty `id` field.
+   Source: `apps/api/plane/api/views/issue.py`
+   (`WorkspaceIssueAPIEndpoint.get`, lines ~228–248) and
+   `apps/api/plane/api/urls/work_item.py` (the
+   `work-item-by-identifier` / `issue-by-identifier` path entries).
 
 ## Open questions
 

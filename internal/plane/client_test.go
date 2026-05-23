@@ -808,6 +808,120 @@ func TestCreateProjectLabel_APIError(t *testing.T) {
 	}
 }
 
+func TestGetIssueBySequenceID_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(WorkItem{
+			ID:         "issue-uuid",
+			Name:       "Fix the thing",
+			SequenceID: 123,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.GetIssueBySequenceID(context.Background(), "PFB", 123)
+	if err != nil {
+		t.Fatalf("GetIssueBySequenceID: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	// Public v1 has no "?sequence_id=" filter on the per-project list
+	// endpoint; the lookup goes through the workspace-level work-items
+	// endpoint, which encodes the (project_identifier, sequence_id) pair
+	// in the URL path rather than as query params. Source:
+	// apps/api/plane/api/urls/work_item.py (the work-item-by-identifier
+	// route) and apps/api/plane/api/views/issue.py
+	// (WorkspaceIssueAPIEndpoint.get).
+	if want := "/workspaces/acme/work-items/PFB-123/"; gotPath != want {
+		t.Errorf("path = %q, want %q (trailing slash is mandatory)", gotPath, want)
+	}
+	if gotQuery != "" {
+		t.Errorf("query = %q, want empty (sequence_id is in the path, not query)", gotQuery)
+	}
+	if got.ID != "issue-uuid" || got.SequenceID != 123 {
+		t.Errorf("WorkItem = %+v, want {ID:issue-uuid SequenceID:123}", got)
+	}
+}
+
+func TestGetIssueBySequenceID_NotFound(t *testing.T) {
+	t.Parallel()
+
+	t.Run("404_returns_ErrNotFound", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":"The requested resource does not exist."}`)
+		}))
+		t.Cleanup(srv.Close)
+
+		c := newTestClient(t, srv)
+		_, err := c.GetIssueBySequenceID(context.Background(), "PFB", 9999)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+		// Callers must not need to dig into *APIError for the 404 case.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			t.Errorf("404 surfaced as *APIError (%v); want sentinel ErrNotFound only", apiErr)
+		}
+	})
+
+	t.Run("empty_body_returns_ErrNotFound", func(t *testing.T) {
+		t.Parallel()
+		// Belt-and-braces: if Plane ever changes the contract to return
+		// HTTP 200 with an empty object instead of a 404, our client must
+		// still surface ErrNotFound rather than a zero-value WorkItem.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}))
+		t.Cleanup(srv.Close)
+
+		c := newTestClient(t, srv)
+		_, err := c.GetIssueBySequenceID(context.Background(), "PFB", 9999)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestGetIssueBySequenceID_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.GetIssueBySequenceID(context.Background(), "PFB", 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if apiErr.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", apiErr.Method)
+	}
+}
+
 // keys returns the sorted keys of m for use in error messages.
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
