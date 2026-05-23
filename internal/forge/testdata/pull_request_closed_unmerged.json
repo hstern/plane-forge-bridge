@@ -1,0 +1,47 @@
+{
+  "action": "closed",
+  "number": 8,
+  "pull_request": {
+    "id": 9002,
+    "number": 8,
+    "title": "Experiment: switch to grid layout",
+    "body": "Abandoning this approach.",
+    "state": "closed",
+    "user": {
+      "id": 8,
+      "login": "bob",
+      "full_name": "Bob Example",
+      "email": "bob@example.test",
+      "html_url": "https://forge.example.test/bob"
+    },
+    "assignees": [],
+    "labels": [],
+    "html_url": "https://forge.example.test/acme/widget/pulls/8",
+    "merged": false,
+    "head": {"ref": "exp/grid", "sha": "abcdefabcdefabcdef0000000000000000abcdef"},
+    "base": {"ref": "main",     "sha": "1234567890abcdef00000000000000001234abcd"},
+    "created_at": "2026-05-22T10:00:00Z",
+    "updated_at": "2026-05-23T09:00:00Z"
+  },
+  "repository": {
+    "id": 500,
+    "name": "widget",
+    "full_name": "acme/widget",
+    "owner": {
+      "id": 1,
+      "login": "acme",
+      "full_name": "Acme Org",
+      "email": "ops@acme.test",
+      "html_url": "https://forge.example.test/acme"
+    },
+    "html_url": "https://forge.example.test/acme/widget",
+    "private": false
+  },
+  "sender": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  }
+}

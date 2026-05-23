@@ -1,0 +1,47 @@
+{
+  "action": "closed",
+  "number": 42,
+  "issue": {
+    "id": 1001,
+    "number": 42,
+    "title": "Login button is misaligned on small screens",
+    "body": "Repro: open the login page at 320px width.",
+    "state": "closed",
+    "user": {
+      "id": 7,
+      "login": "alice",
+      "full_name": "Alice Example",
+      "email": "alice@example.test",
+      "html_url": "https://forge.example.test/alice"
+    },
+    "assignees": [],
+    "labels": [
+      {"id": 100, "name": "bug", "color": "ee0701"}
+    ],
+    "html_url": "https://forge.example.test/acme/widget/issues/42",
+    "created_at": "2026-05-23T11:00:00Z",
+    "updated_at": "2026-05-23T12:30:00Z",
+    "closed_at": "2026-05-23T12:30:00Z"
+  },
+  "repository": {
+    "id": 500,
+    "name": "widget",
+    "full_name": "acme/widget",
+    "owner": {
+      "id": 1,
+      "login": "acme",
+      "full_name": "Acme Org",
+      "email": "ops@acme.test",
+      "html_url": "https://forge.example.test/acme"
+    },
+    "html_url": "https://forge.example.test/acme/widget",
+    "private": false
+  },
+  "sender": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  }
+}

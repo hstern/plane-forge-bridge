@@ -1,0 +1,47 @@
+{
+  "action": "opened",
+  "number": 7,
+  "pull_request": {
+    "id": 9001,
+    "number": 7,
+    "title": "Fix flex overflow on the login page",
+    "body": "Closes [PROJ-42].\n\nUses min-width:0 on the inner flex item.",
+    "state": "open",
+    "user": {
+      "id": 8,
+      "login": "bob",
+      "full_name": "Bob Example",
+      "email": "bob@example.test",
+      "html_url": "https://forge.example.test/bob"
+    },
+    "assignees": [],
+    "labels": [],
+    "html_url": "https://forge.example.test/acme/widget/pulls/7",
+    "merged": false,
+    "head": {"ref": "fix/login-flex", "sha": "deadbeefcafebabe0000000000000000deadbeef"},
+    "base": {"ref": "main",            "sha": "1234567890abcdef00000000000000001234abcd"},
+    "created_at": "2026-05-23T13:00:00Z",
+    "updated_at": "2026-05-23T13:00:00Z"
+  },
+  "repository": {
+    "id": 500,
+    "name": "widget",
+    "full_name": "acme/widget",
+    "owner": {
+      "id": 1,
+      "login": "acme",
+      "full_name": "Acme Org",
+      "email": "ops@acme.test",
+      "html_url": "https://forge.example.test/acme"
+    },
+    "html_url": "https://forge.example.test/acme/widget",
+    "private": false
+  },
+  "sender": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  }
+}
