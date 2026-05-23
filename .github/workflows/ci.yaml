@@ -138,10 +138,16 @@ jobs:
           FORGEJO__server__ROOT_URL: "http://localhost:3000/"
           FORGEJO__server__HTTP_PORT: "3000"
           FORGEJO__server__DOMAIN: "localhost"
+          # Webhooks default to refusing delivery to private/unknown hosts.
+          # In CI the bridge is reachable only as the container name `bridge`
+          # on the docker network, so we open the allowlist. Not appropriate
+          # for production.
+          FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
           GITEA__security__INSTALL_LOCK: "true"
           GITEA__server__ROOT_URL: "http://localhost:3000/"
           GITEA__server__HTTP_PORT: "3000"
           GITEA__server__DOMAIN: "localhost"
+          GITEA__webhook__ALLOWED_HOST_LIST: "*"
     env:
       FORGE_URL: http://localhost:3000
       FORGE_ADMIN_USER: pfbadmin
