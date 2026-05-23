@@ -2,8 +2,9 @@
 
 Bidirectional translation between parsed forge webhook events and Plane
 REST API calls. Covers issues (step 6), comments (step 7), labels +
-state-map coverage on issue writes (step 8), and PR/branch → work-item
-state automation (step 9) in the
+state-map coverage on issue writes (step 8), PR/branch → work-item
+state automation (step 9), and plane → forge issue translation
+(step 10) in the
 [build order](../../AGENTS.md#build-order).
 
 ## What it does
@@ -17,6 +18,7 @@ forge webhook → server (HMAC + LRU) → sync.Engine.HandleForgeIssue       →
                                     → sync.Engine.HandleForgeComment     → plane REST
                                     → sync.Engine.HandleForgePullRequest → plane REST
 plane webhook → server (HMAC + LRU) → sync.Engine.HandlePlaneComment     → forge REST
+                                    → sync.Engine.HandlePlaneWorkItem    → forge REST
 ```
 
 The engine is a pure translator. It does **not** own the loop-break LRU —
@@ -51,6 +53,38 @@ type ForgeClient interface {
     DeleteComment(ctx, owner, repo string, commentID int64) error
 }
 
+// ForgeIssueWriter is the optional plane → forge issue write surface
+// used by HandlePlaneWorkItem. Kept separate from ForgeClient so a
+// forge.Client build that does not yet implement these methods can
+// still satisfy the rest of the bridge's wiring; the handler
+// type-asserts at dispatch time and surfaces ActionSkipped with
+// Reason="plane → forge issue writes deferred — forge client build
+// does not implement ForgeIssueWriter" when the assertion fails.
+type ForgeIssueWriter interface {
+    CreateIssue(ctx, owner, repo string, req ForgeCreateIssueRequest) (*forge.Issue, error)
+    UpdateIssue(ctx, owner, repo string, number int64, req ForgeUpdateIssueRequest) (*forge.Issue, error)
+}
+
+// ForgeCreateIssueRequest / ForgeUpdateIssueRequest are sync-local
+// contracts that mirror the request shapes a parallel commit adds to
+// internal/forge. They are declared in this package so internal/sync
+// owns its own translation contract and tests don't depend on the
+// sibling commit having landed.
+type ForgeCreateIssueRequest struct {
+    Title     string
+    Body      string
+    Labels    []int64
+    Assignees []string
+}
+
+type ForgeUpdateIssueRequest struct {
+    Title     *string
+    Body      *string
+    State     *string
+    Labels    *[]int64
+    Assignees *[]string
+}
+
 type BridgeBot struct {
     ForgeUsername string
     PlaneMemberID string
@@ -71,6 +105,7 @@ func (e *Engine) HandleForgeIssue(ctx context.Context, evt *forge.Event) (*Outco
 func (e *Engine) HandleForgeComment(ctx context.Context, evt *forge.Event) (*Outcome, error)
 func (e *Engine) HandleForgePullRequest(ctx context.Context, evt *forge.Event) (*Outcome, error)
 func (e *Engine) HandlePlaneComment(ctx context.Context, evt *plane.Event) (*Outcome, error)
+func (e *Engine) HandlePlaneWorkItem(ctx context.Context, evt *plane.Event) (*Outcome, error)
 
 type Outcome struct {
     Action     Action
@@ -94,6 +129,13 @@ const (
 // translation path moves.
 func RenderDescription(forgeBody, senderLogin, senderHTMLURL, repoFullName, deliveryID string, mapped bool) string
 func RenderComment(originalBody, senderLogin, senderHTMLURL, repoFullName, deliveryID string, src idemp.Source, mapped bool) string
+func RenderPlaneWorkItemDescription(planeBody, actor, deliveryID string, ref PlaneRefMarker) string
+
+// Plane → forge reverse-lookup marker — distinct from the loop-break
+// marker. See "Plane reference marker" below.
+type PlaneRefMarker struct { WorkspaceID, ProjectID, WorkItemID string }
+func RenderPlaneRefMarker(m PlaneRefMarker) string
+func ExtractPlaneRefMarker(body string) (PlaneRefMarker, bool)
 
 // parseExternalRef is unexported but documented here so the contract is
 // visible. It validates the (external_source, external_id) pair the bridge
@@ -146,6 +188,90 @@ path.
 | `EventCommentUpdated`       | `ActionSkipped` — see "Open questions" below                                                              |
 | `EventCommentDeleted`       | `ActionSkipped` — see "Open questions" below                                                              |
 | anything else               | `ActionSkipped` ("unsupported")                                                                          |
+
+### plane → forge issues (`HandlePlaneWorkItem`)
+
+Step 10. The inverse of `HandleForgeIssue` — closes the bidirectional
+loop for issues. Branches on `evt.Kind` after first checking that
+`evt.WorkItem.Project` matches a configured link's `PlaneProjectID`:
+
+| evt.Kind                  | Behaviour                                                                                                  |
+|---------------------------|------------------------------------------------------------------------------------------------------------|
+| `EventWorkItemCreated`    | `ForgeIssueWriter.CreateIssue` on the linked forge repo. Body carries BOTH the loop-break marker AND the `PlaneRefMarker`. Labels translated UUID → name (via plane label cache) → forge integer ID (via forge label cache, auto-create on miss). |
+| `EventWorkItemUpdated`    | `ActionSkipped` with `Reason="update for an unmirrored work item — full reverse lookup pending forge.Client.SearchIssues"`. |
+| `EventWorkItemDeleted`    | `ActionSkipped` with `Reason="plane delete events are not mirrored to forge (issues are closed, not deleted)"`.            |
+| anything else             | `ActionSkipped` (`"unsupported event"`)                                                                    |
+
+Why `updated` is a no-op in v1: the bridge has no field on the forge
+issue that points back at the plane work item (forge issues don't
+expose an `external_id`). The reverse lookup is a body-text search for
+the `PlaneRefMarker` we wrote at create time, but that requires a
+`forge.Client.SearchIssues` method that doesn't yet exist. When it
+lands, this branch flips from skip to a `UpdateIssue` PATCH that
+mirrors title, body, labels, and state through `inverseStateMap`.
+
+Why `deleted` is a no-op by design: forge does not expose a delete
+endpoint on issues. The eventual behaviour is "close instead of
+delete", which also needs the `SearchIssues` reverse lookup.
+
+`Outcome.WorkItemID` on a successful create carries the FORGE issue
+NUMBER (per-repo monotonic, stringified). `Outcome.CommentID` is empty.
+This is symmetric with the forge → plane path where the outcome carries
+the plane work-item ID.
+
+#### Plane reference marker
+
+The forge issue body emitted on a plane → forge create carries TWO
+HTML-comment markers:
+
+```
+<!-- pfb:plane-workitem=<workspace_id>/<project_id>/<work_item_id> -->
+<!-- pfb:src=plane,evt=<delivery-id> -->
+```
+
+- **PlaneRefMarker** (the first one) is the durable reverse-lookup
+  key. Stable across re-deliveries — names the SOURCE WORK ITEM. It is
+  what a future `SearchIssues`-powered update path will use to find
+  the forge issue mirroring a given plane work item.
+- **Loop-break marker** (the second one) is the per-delivery idempotency
+  defence. It carries the EVENT ID and is consumed by `idemp.Extract`
+  on the inbound forge webhook path so the bridge doesn't bounce its
+  own write back to plane.
+
+Order matters: the loop-break marker is anchored on end-of-body by
+`idemp.Extract`, so the PlaneRefMarker MUST precede it. Both are
+required.
+
+#### Label translation through two caches
+
+Plane's `WorkItem.Labels` is a list of label UUIDs; forge labels are
+identified by integer IDs that callers look up by name. The bridge
+translates with two cache hops:
+
+```
+plane UUID → name      (via plane label cache; reverse-indexed at
+                        call time so the existing forward cache
+                        does double duty)
+name → forge int64 ID  (via forge label cache; auto-create on miss
+                        with a neutral default color "#cccccc")
+```
+
+UUIDs that don't resolve to a name (e.g. a label deleted on the plane
+side between the event and the cache fetch) are silently dropped:
+propagating them would force the create to fail or to auto-create
+forge labels under uselessly-named keys.
+
+#### Rollout staggering
+
+Issue write methods (`CreateIssue`, `UpdateIssue`) live on a separate
+optional interface — `ForgeIssueWriter` — so a forge.Client build
+without those methods still satisfies the rest of the bridge's wiring.
+The handler type-asserts at dispatch time; a build without
+`ForgeIssueWriter` produces `ActionSkipped` with
+`Reason="plane → forge issue writes deferred — forge client build does
+not implement ForgeIssueWriter"`. This lets the engine handler land
+ahead of the forge.Client extension without breaking deployments that
+have only rebuilt one binary.
 
 ### forge → plane PR/branch state (`HandleForgePullRequest`)
 
@@ -414,6 +540,35 @@ Sketch of follow-ups, ordered by cost:
 (1) is the most likely choice and is tracked outside this package, in
 the build-order roadmap.
 
+### Plane → forge reverse lookup
+
+`HandlePlaneWorkItem` writes a `PlaneRefMarker` into every forge issue
+body it creates, so a future update path can find the mirrored forge
+issue by scanning issue bodies for the marker. v1 ships without that
+read path because there is no `forge.Client.SearchIssues` method yet:
+
+- `work_item.created` works end-to-end: a new plane work item produces
+  a new forge issue with both markers.
+- `work_item.updated` is `ActionSkipped` with the deferred-lookup
+  reason. The most common operator workflow ("file in Plane, see it
+  appear on Forgejo") is unaffected.
+- `work_item.deleted` is `ActionSkipped` by design.
+
+When `SearchIssues` lands, the `updated` branch flips from skip to a
+proper PATCH using the `inverseStateMap` helper already in this
+package.
+
+### Multiple links pointing at one plane project
+
+v1 of `linkForPlaneProject` takes the FIRST matching link and ignores
+the rest. An operator configuring two forge repos that both mirror a
+single plane project sees the work item appear in only one of them.
+The alternative (N forge issues per plane work item) would defeat the
+loop-break LRU because each mirrored forge issue produces a distinct
+inbound delivery ID. If a use case for fan-out emerges, the engine
+will need a separate dedup discriminator and a "primary mirror"
+concept — neither is in scope today.
+
 ### Label cache invalidation
 
 The label resolver does not invalidate on rename. If an operator renames a
@@ -435,17 +590,18 @@ and operators can wait out the TTL. Options if we need to do better:
 
 This package covers issues (step 6), the forward/backward comment paths
 (step 7), label translation + complete state-map coverage on issue
-writes (step 8), and PR/branch → work-item state automation (step 9).
-Remaining gaps live in later steps:
+writes (step 8), PR/branch → work-item state automation (step 9), and
+plane → forge issue create (step 10, partial). Remaining gaps:
 
 - **PR review state → work-item state** — `pull_request_review` events
   are short-circuited as `ActionSkipped` for now (see the PR section
   above). The `reviewed` key in `pr_state_map` is reserved.
-- **Plane → forge issue translation** (step 10) — a separate handler that
-  the server will dispatch from `/plane/webhook`. The forge-side label
-  helpers (`ListRepoLabels` / `CreateRepoLabel`) are wired into the
-  `ForgeClient` interface and fake in this step so step 10 can consume
-  them without touching the contract.
+- **Plane → forge `work_item.updated`** — skipped pending
+  `forge.Client.SearchIssues`. See the plane → forge issues section
+  above and the "Open questions" entry below.
+- **Plane → forge `work_item.deleted`** — by design, no-op. Forge does
+  not expose a delete endpoint on issues; the eventual mirror is a
+  close, which also waits on `SearchIssues`.
 - **Comment update/delete in both directions** — see "Open questions".
 
 ## Dependencies

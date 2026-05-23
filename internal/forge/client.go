@@ -103,6 +103,42 @@ func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int64)
 	return &out, nil
 }
 
+// CreateIssue opens a new issue on owner/repo.
+// POST /repos/{owner}/{repo}/issues.
+//
+// Title is the only required field upstream. Labels on the request are
+// integer IDs (NOT names) — the caller must resolve names → IDs via
+// ListRepoLabels + CreateRepoLabel first; this is the opposite of
+// Plane's label API, which takes UUIDs (also IDs but string-shaped).
+func (c *Client) CreateIssue(ctx context.Context, owner, repo string, req CreateIssueRequest) (*Issue, error) {
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/issues", owner, repo)
+	var out Issue
+	if err := c.do(ctx, http.MethodPost, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateIssue patches an existing issue on owner/repo by its (1-based)
+// number. Used to flip state (open ↔ closed) and to edit
+// title/body/labels/assignees.
+// PATCH /repos/{owner}/{repo}/issues/{number}.
+//
+// 404 maps to ErrNotFound so callers can treat "already gone" as
+// idempotent; any other non-2xx becomes *APIError.
+func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int64, req UpdateIssueRequest) (*Issue, error) {
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d", owner, repo, number)
+	var out Issue
+	if err := c.do(ctx, http.MethodPatch, path, req, &out); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateComment posts a new comment on issue number `issueNumber` in
 // owner/repo. The Gitea/Forgejo API path is
 // POST /repos/{owner}/{repo}/issues/{index}/comments.

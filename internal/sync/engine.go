@@ -50,6 +50,13 @@ type PlaneClient interface {
 // ForgeClient is the subset of the forge.Client REST API the sync engine
 // needs for the plane → forge direction. The concrete forge.Client is
 // expected to satisfy this interface; tests substitute a hand-written fake.
+//
+// Issue write methods (CreateIssue, UpdateIssue) live on a separate
+// optional interface — ForgeIssueWriter — so the bridge can be wired
+// against a forge.Client build that does not yet implement them. The
+// HandlePlaneWorkItem handler type-asserts into ForgeIssueWriter at
+// dispatch time and skips with a clear reason when the assertion
+// fails.
 type ForgeClient interface {
 	GetIssue(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
 	ListRepoLabels(ctx context.Context, owner, repo string) ([]forge.Label, error)
@@ -57,6 +64,17 @@ type ForgeClient interface {
 	CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
 	UpdateComment(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
 	DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
+}
+
+// ForgeIssueWriter is the plane → forge issue write surface used by
+// HandlePlaneWorkItem. Kept separate from ForgeClient so a forge.Client
+// build that does not implement these methods can still satisfy the
+// rest of the bridge's wiring; HandlePlaneWorkItem type-asserts at
+// dispatch time and surfaces a clear ActionSkipped when the assertion
+// fails. The production *forge.Client implements both methods.
+type ForgeIssueWriter interface {
+	CreateIssue(ctx context.Context, owner, repo string, req forge.CreateIssueRequest) (*forge.Issue, error)
+	UpdateIssue(ctx context.Context, owner, repo string, number int64, req forge.UpdateIssueRequest) (*forge.Issue, error)
 }
 
 // BridgeBot identifies the configured bridge bot account on both sides.
@@ -131,8 +149,9 @@ type Engine struct {
 	Bot         BridgeBot
 	Log         *slog.Logger
 
-	stateCache stateCache
-	labelCache labelCache
+	stateCache      stateCache
+	labelCache      labelCache
+	forgeLabelCache forgeLabelCache
 }
 
 // NewEngine constructs an Engine from a PlaneClient, a ForgeClient (which

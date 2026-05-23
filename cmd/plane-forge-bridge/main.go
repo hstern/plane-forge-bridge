@@ -67,6 +67,12 @@ func run(args []string, stdout, stderr *os.File) error {
 		&http.Client{Timeout: 30 * time.Second})
 	forgeClient.UserAgent = "plane-forge-bridge/" + version
 
+	// Compile-time assert: the production forge.Client must satisfy
+	// pfbsync.ForgeIssueWriter so HandlePlaneWorkItem can downcast at
+	// dispatch time. If this ever stops compiling, the plane→forge
+	// create path will silently degrade to ActionSkipped.
+	var _ pfbsync.ForgeIssueWriter = forgeClient
+
 	translator := pfbsync.NewEngine(planeClient, forgeClient, cfg, logger)
 	srv := server.New(cfg, logger, translator)
 

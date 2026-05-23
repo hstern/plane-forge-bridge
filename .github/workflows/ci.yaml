@@ -185,9 +185,15 @@ jobs:
           cname=$(docker inspect -f '{{.Name}}' "$cid" | sed 's|^/||')
           net=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" | tr ' ' '\n' | grep -vE '^(bridge|host|none|)$' | head -n1)
           if [ -z "$net" ]; then net=bridge; fi
-          echo "forge container=$cname network=$net"
+          # Use the container's IP directly for the bridge's forge URL —
+          # docker DNS over the auto-generated container name has been flaky
+          # under load (one Forgejo leg hit "no such host"); the IP is
+          # stable for the duration of the job. Matches fj-bellows' pattern.
+          ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$cid")
+          echo "forge container=$cname network=$net ip=$ip"
           echo "name=$cname"   >> "$GITHUB_OUTPUT"
           echo "network=$net" >> "$GITHUB_OUTPUT"
+          echo "ip=$ip"       >> "$GITHUB_OUTPUT"
 
       - name: Start plane-stub on the forge network
         run: |
@@ -205,7 +211,9 @@ jobs:
 
       - name: Write bridge config
         env:
-          FORGE_INTERNAL_HOST: ${{ steps.forge.outputs.name }}
+          # Address forge by IP rather than container DNS name — docker DNS
+          # over the auto-generated underscored hostnames has been flaky.
+          FORGE_INTERNAL_HOST: ${{ steps.forge.outputs.ip }}
         run: |
           set -euo pipefail
           # The bridge config uses container names (resolved on the docker
@@ -480,6 +488,78 @@ jobs:
           done
           echo "ERROR: no PATCH to In Progress state recorded within ${PR_WAIT_SEC}s"
           curl -fsS "$PLANE_STUB_URL/_/recorded" | jq '[.[] | select(.method=="PATCH")]'
+          exit 1
+
+      - name: Plane→forge — POST a synthetic plane work_item.created webhook
+        env:
+          PLANE_SECRET: ${{ env.PFB_PLANE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          # Build a minimal plane webhook payload referencing the configured
+          # link's plane_project_id (aaaaaaaa...). The bridge will resolve
+          # the link, render the description with both markers, and POST a
+          # new issue to the forge.
+          body=$(cat <<'JSON'
+          {
+            "event": "issue",
+            "action": "create",
+            "workspace_id": "00000000-0000-0000-0000-000000000aaa",
+            "webhook_id": "00000000-0000-0000-0000-000000000bbb",
+            "data": {
+              "id": "33333333-3333-3333-3333-333333333333",
+              "name": "e2e: hello from plane",
+              "description_html": "<p>Issue created on Plane that the bridge should mirror to forge.</p>",
+              "state": "11111111-0000-0000-0000-000000000002",
+              "project": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "workspace": "00000000-0000-0000-0000-000000000aaa",
+              "created_by": "44444444-4444-4444-4444-444444444444",
+              "assignees": [],
+              "labels": [],
+              "sequence_id": 999
+            }
+          }
+          JSON
+          )
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$PLANE_SECRET" -hex | awk '{print $NF}')
+          status=$(curl -sS -o /tmp/pwh.resp -w '%{http_code}' \
+            -X POST http://127.0.0.1:8080/plane/webhook \
+            -H "X-Plane-Signature: $sig" \
+            -H "X-Plane-Event: issue" \
+            -H "X-Plane-Delivery: plane-to-forge-${{ github.run_id }}" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$body")
+          echo "status=$status body=$(cat /tmp/pwh.resp)"
+          [ "$status" = "202" ] || { echo "ERROR: expected 202, got $status"; exit 1; }
+
+      - name: Assert forge now has an issue with the plane-ref marker
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            issues=$(curl -fsS \
+              -H "Authorization: token $FORGE_TOKEN" \
+              "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/issues?state=all")
+            match=$(printf '%s' "$issues" | jq -c '
+              .[] |
+              select(.body | test("<!-- pfb:plane-workitem=")) |
+              {number, title, body}
+            ' | head -n1)
+            if [ -n "$match" ]; then
+              echo "matched forge issue with plane-ref marker after ${i}s:"
+              printf '%s\n' "$match" | jq .
+              # Also check the loop-break marker is present.
+              body=$(printf '%s' "$match" | jq -r .body)
+              if ! printf '%s' "$body" | grep -q "<!-- pfb:src=plane,evt="; then
+                echo "ERROR: forge issue body missing loop-break marker"
+                echo "body=$body"
+                exit 1
+              fi
+              echo "loop-break marker also present"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: no forge issue carrying the plane-ref marker found within 30s"
+          printf '%s' "$issues" | jq .
           exit 1
 
       - name: Capture diagnostics on failure

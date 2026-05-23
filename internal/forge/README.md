@@ -87,6 +87,8 @@ type Client struct {
 func NewClient(baseURL, token string, hc *http.Client) *Client
 
 func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int64) (*Issue, error)
+func (c *Client) CreateIssue(ctx context.Context, owner, repo string, req CreateIssueRequest) (*Issue, error)
+func (c *Client) UpdateIssue(ctx context.Context, owner, repo string, number int64, req UpdateIssueRequest) (*Issue, error)
 func (c *Client) CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req CreateCommentRequest) (*Comment, error)
 func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentID int64, req UpdateCommentRequest) (*Comment, error)
 func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
@@ -97,6 +99,8 @@ func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req Cr
 | Method            | HTTP   | Path                                                       | Returns                  |
 | ----------------- | ------ | ---------------------------------------------------------- | ------------------------ |
 | `GetIssue`        | GET    | `/api/v1/repos/{owner}/{repo}/issues/{number}`             | `*Issue` / `ErrNotFound` |
+| `CreateIssue`     | POST   | `/api/v1/repos/{owner}/{repo}/issues`                      | `*Issue`                 |
+| `UpdateIssue`     | PATCH  | `/api/v1/repos/{owner}/{repo}/issues/{number}`             | `*Issue` / `ErrNotFound` |
 | `CreateComment`   | POST   | `/api/v1/repos/{owner}/{repo}/issues/{index}/comments`     | `*Comment`               |
 | `UpdateComment`   | PATCH  | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `*Comment`               |
 | `DeleteComment`   | DELETE | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `nil` / `ErrNotFound`    |
@@ -106,6 +110,19 @@ func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req Cr
 Request bodies:
 
 ```go
+type CreateIssueRequest struct {
+    Title     string   `json:"title"`
+    Body      string   `json:"body,omitempty"`
+    Labels    []int64  `json:"labels,omitempty"`    // forge label IDs, NOT names
+    Assignees []string `json:"assignees,omitempty"` // forge usernames
+}
+type UpdateIssueRequest struct {
+    Title     *string   `json:"title,omitempty"`
+    Body      *string   `json:"body,omitempty"`
+    State     *string   `json:"state,omitempty"` // "open" | "closed"
+    Labels    *[]int64  `json:"labels,omitempty"`
+    Assignees *[]string `json:"assignees,omitempty"`
+}
 type CreateCommentRequest struct { Body string `json:"body"` }
 type UpdateCommentRequest struct { Body string `json:"body"` }
 type CreateLabelRequest   struct {
@@ -114,6 +131,12 @@ type CreateLabelRequest   struct {
     Description string `json:"description,omitempty"`
 }
 ```
+
+`UpdateIssueRequest`'s fields are all pointers (slices included via
+`*[]X`) so callers can distinguish "leave alone" (nil) from "set"
+(non-nil). Sending `UpdateIssueRequest{State: &closed}` flips state
+without blanking the title/body/labels/assignees — see
+`TestUpdateIssue_StateCloseOnly`.
 
 Forge list endpoints return a bare JSON array, NOT a `{results: [...]}`
 envelope (that's Plane's convention). `ListRepoLabels` decodes straight
@@ -146,6 +169,19 @@ can be added without churning every caller.
    comments`); update/delete take the comment *ID*
    (`.../issues/comments/{id}`). The two namespaces are intentional in
    the upstream API.
+4. **Issue labels on create/update are integer IDs, NOT names.** The
+   `labels` field on `CreateIssueRequest` / `UpdateIssueRequest` is
+   `[]int64` of forge label IDs. Plane's label API also takes IDs (but
+   they're UUID strings); Gitea/Forgejo's are autoincrement integers.
+   Callers must resolve names → IDs via `ListRepoLabels`, falling back
+   to `CreateRepoLabel` for missing ones, before constructing the
+   request. Sending names silently 422s on most forge versions.
+5. **`UpdateIssueRequest` uses pointers for "leave alone" vs "set".**
+   Every field (including the slices) is a pointer with
+   `json:"...,omitempty"`. An `UpdateIssueRequest{State: &closed}`
+   produces `{"state":"closed"}` on the wire — nothing else is touched.
+   This is the canonical way for the bridge to flip state without
+   accidentally blanking title/body/labels/assignees.
 
 ## Handler skeleton
 
@@ -200,8 +236,10 @@ fields are tolerated.
 - The loop-break marker emit/strip logic (lives in `internal/loopbreak/`,
   added later — this package only surfaces `DeliveryID` so the caller can
   build the marker).
-- Issue create/update/labels on the outbound side — only `GetIssue` plus
-  comment CRUD ship today; broader issue mutation lands with later
-  build-order steps.
+- Name → label-ID resolution. `CreateIssueRequest.Labels` /
+  `UpdateIssueRequest.Labels` take integer label IDs; the
+  `ListRepoLabels` + `CreateRepoLabel` methods are the building blocks,
+  but the actual translator (cache, create-on-miss, etc.) lives in
+  `internal/sync`.
 - Identity mapping (`forge_username → plane_member_uuid`) — config concern.
 - Anything Plane-specific. Plane payloads are handled by `internal/plane`.

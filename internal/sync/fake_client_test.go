@@ -275,6 +275,8 @@ type fakeForgeClient struct {
 	mu sync.Mutex
 
 	GetIssueFunc        func(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
+	CreateIssueFunc     func(ctx context.Context, owner, repo string, req forge.CreateIssueRequest) (*forge.Issue, error)
+	UpdateIssueFunc     func(ctx context.Context, owner, repo string, number int64, req forge.UpdateIssueRequest) (*forge.Issue, error)
 	ListRepoLabelsFunc  func(ctx context.Context, owner, repo string) ([]forge.Label, error)
 	CreateRepoLabelFunc func(ctx context.Context, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error)
 	CreateCommentFunc   func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
@@ -282,11 +284,26 @@ type fakeForgeClient struct {
 	DeleteCommentFunc   func(ctx context.Context, owner, repo string, commentID int64) error
 
 	IssueGets      []forgeGetIssueCall
+	IssueCreates   []forgeIssueCreateCall
+	IssueUpdates   []forgeIssueUpdateCall
 	LabelLists     []forgeLabelListCall
 	LabelCreates   []forgeLabelCreateCall
 	CommentCreates []forgeCommentCreateCall
 	CommentUpdates []forgeCommentUpdateCall
 	CommentDeletes []forgeCommentDeleteCall
+}
+
+type forgeIssueCreateCall struct {
+	Owner string
+	Repo  string
+	Req   forge.CreateIssueRequest
+}
+
+type forgeIssueUpdateCall struct {
+	Owner  string
+	Repo   string
+	Number int64
+	Req    forge.UpdateIssueRequest
 }
 
 type forgeLabelListCall struct {
@@ -335,6 +352,47 @@ func (f *fakeForgeClient) GetIssue(ctx context.Context, owner, repo string, numb
 		return fn(ctx, owner, repo, number)
 	}
 	return nil, forge.ErrUnsupportedEvent
+}
+
+func (f *fakeForgeClient) CreateIssue(ctx context.Context, owner, repo string, req forge.CreateIssueRequest) (*forge.Issue, error) {
+	f.mu.Lock()
+	f.IssueCreates = append(f.IssueCreates, forgeIssueCreateCall{Owner: owner, Repo: repo, Req: req})
+	fn := f.CreateIssueFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, req)
+	}
+	// Default: synthesise a stable issue NUMBER so tests that only assert
+	// the outcome don't need an override. Number=131313 is intentionally
+	// distinct from the comment fake's default (424242) so a test that
+	// confuses outcomes catches it.
+	return &forge.Issue{
+		ID:     999,
+		Number: 131313,
+		Title:  req.Title,
+		Body:   req.Body,
+	}, nil
+}
+
+func (f *fakeForgeClient) UpdateIssue(ctx context.Context, owner, repo string, number int64, req forge.UpdateIssueRequest) (*forge.Issue, error) {
+	f.mu.Lock()
+	f.IssueUpdates = append(f.IssueUpdates, forgeIssueUpdateCall{Owner: owner, Repo: repo, Number: number, Req: req})
+	fn := f.UpdateIssueFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, number, req)
+	}
+	issue := &forge.Issue{Number: number}
+	if req.Title != nil {
+		issue.Title = *req.Title
+	}
+	if req.Body != nil {
+		issue.Body = *req.Body
+	}
+	if req.State != nil {
+		issue.State = *req.State
+	}
+	return issue, nil
 }
 
 func (f *fakeForgeClient) ListRepoLabels(ctx context.Context, owner, repo string) ([]forge.Label, error) {
