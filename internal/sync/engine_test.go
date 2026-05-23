@@ -1319,6 +1319,57 @@ func TestHandle_PullRequestEdited_Skipped(t *testing.T) {
 	}
 }
 
+// TestHandle_IssueOpened_AssigneeFromEmailMatch is the v2 identity-
+// resolution coverage on the forge → plane path. The sender has no
+// entry in the static config map but does have a matching Plane
+// member by email; the resolver returns that member's UUID and the
+// CreateIssueRequest.Assignees lands it.
+func TestHandle_IssueOpened_AssigneeFromEmailMatch(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+		return []Member{
+			{ID: "plane-uuid-stranger", Email: "stranger@example.com"},
+		}, nil
+	}
+	evt := mkIssueEvent(forge.EventIssueOpened, "stranger")
+	evt.Sender.Email = "stranger@example.com"
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.Creates) != 1 {
+		t.Fatalf("want 1 create, got %d", len(fc.Creates))
+	}
+	got := fc.Creates[0].Req.Assignees
+	if len(got) != 1 || got[0] != "plane-uuid-stranger" {
+		t.Errorf("Assignees=%v, want [plane-uuid-stranger]", got)
+	}
+}
+
+// TestHandle_IssueOpened_NoAssigneeWhenNoMatch covers the third arm
+// of the v2 resolver: no static config entry, no email match. The
+// request must omit Assignees so Plane leaves the work item
+// unassigned — the bridge bot is the API caller but doesn't impose
+// itself as assignee.
+func TestHandle_IssueOpened_NoAssigneeWhenNoMatch(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	// Default ListWorkspaceMembers returns nil — no email match.
+	evt := mkIssueEvent(forge.EventIssueOpened, "stranger")
+	evt.Sender.Email = "stranger@example.com"
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.Creates) != 1 {
+		t.Fatalf("want 1 create, got %d", len(fc.Creates))
+	}
+	if len(fc.Creates[0].Req.Assignees) != 0 {
+		t.Errorf("Assignees=%v, want empty (no static + no email match)", fc.Creates[0].Req.Assignees)
+	}
+}
+
 // TestHandle_IssueEdited_PropagatesLabelChanges confirms forge label
 // changes on an existing issue propagate to Plane via the edit update.
 // forge fires issues.edited for label add/remove events, so the edit

@@ -42,6 +42,11 @@ type PlaneClient interface {
     CreateComment(ctx, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
     UpdateComment(ctx, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
     DeleteComment(ctx, projectID, issueID, commentID string) error
+    // v2 identity (step 11): workspace member list for email-based
+    // forge↔plane resolution. Returns the sync-local Member type so
+    // the package compiles independently of the sibling plane.Client
+    // commit that adds the equivalent plane.Member.
+    ListWorkspaceMembers(ctx) ([]Member, error)
 }
 
 type ForgeClient interface {
@@ -51,6 +56,9 @@ type ForgeClient interface {
     CreateComment(ctx, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
     UpdateComment(ctx, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
     DeleteComment(ctx, owner, repo string, commentID int64) error
+    // v2 identity (step 11): substring user search; callers must filter
+    // for exact-email matches.
+    SearchUsers(ctx, query string) ([]forge.User, error)
 }
 
 // ForgeIssueWriter is the optional plane → forge issue write surface
@@ -485,6 +493,89 @@ Empty input → empty output, zero API calls. Errors from `ListProjectLabels`
 or `CreateProjectLabel` propagate; the engine fails the event rather than
 silently dropping labels.
 
+## v2 identity resolution
+
+Step 11 of the build order. Plane's public workspace-members API does
+**not** expose OAuth-derived forge usernames, so the originally
+sketched v2 ("just read the gitea username from the Plane member")
+doesn't work. The bridge instead matches accounts **by email**: forge
+user emails are matched to Plane member emails (and vice versa) when
+the operator's static config has no entry for the user.
+
+Resolution is three layers, first hit wins:
+
+| # | Layer            | Forge → Plane                                                                                                  | Plane → Forge                                                                                                                                  |
+|---|------------------|----------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1 | **Static config**| `Users[forge_username]` → plane member UUID                                                                    | inverse scan of `Users` for a forge username whose mapped value equals the plane member UUID                                                   |
+| 2 | **Email match**  | `evt.Sender.Email` → `ListWorkspaceMembers` → first member with `Email == forge email` (case-insensitive)      | look up the plane member's email in the cached workspace list → `forge.SearchUsers(email)` → filter for exact-email match (substring upstream) |
+| 3 | **Bridge bot**   | resolver returns `""` → handler omits `Assignees` → Plane leaves the work item unassigned; bot is the API caller | same: resolver returns `""` → handler omits `Assignees`; bridge bot is the API caller, no assignee imposed                                     |
+
+Wired into `HandleForgeIssue.handleOpened` (assignee on
+`plane.CreateIssueRequest`) and `HandlePlaneWorkItem.handlePlaneWorkItemCreated`
+(assignee on `forge.CreateIssueRequest`). The unmapped-author **preface**
+on rendered bodies still keys off the static config alone (via
+`mappedAssignee`) — the preface tells the reader who actually posted
+in the source; the email match is a best-effort assignment that
+shouldn't suppress that attribution.
+
+### Caching and concurrency
+
+```
+identityCache {
+    planeMembers      []Member            // workspace-wide list, single TTL
+    planeMembersExpiry time.Time
+    forgeByEmail      map[string]entry    // per-email cache (positive AND negative)
+}
+```
+
+- **Plane members**: the workspace member list is small, so we fetch
+  all of them once per TTL and scan in-process. One mutex serialises
+  refreshes; concurrent resolvers coalesce on the second-caller-wins
+  pattern from `stateCache` / `labelCache`. TTL is `identityCacheTTL`
+  (5 min, matching the other caches).
+- **Forge users**: cached per email (lowercase). Negative results
+  cached too as an empty `Login` so a flood of plane events from a
+  member whose email isn't on the forge produces exactly one
+  `SearchUsers` call per TTL window per email.
+- One mutex per cache section. The forge mutex is held across the
+  upstream call so concurrent callers for the same email coalesce
+  onto a single `SearchUsers` request — covered by
+  `TestResolveForgeUser_ConcurrentSameEmail_OneSearch`.
+
+### Error handling
+
+Identity resolution **never fails the calling handler**. A network
+blip on `ListWorkspaceMembers` or `SearchUsers` logs a warning and
+returns `""`; the handler then omits `Assignees` and proceeds. The
+bridge's core job is mirroring content; a wrong (or missing)
+assignee is much better than a dropped event.
+
+### Limitations
+
+- **Email-based heuristic.** Works for the common case (same email on
+  both sides) and falls back gracefully otherwise. Mixed-domain or
+  alias setups need static config entries.
+- **Negative-result caching means TTL latency on fixes.** If a plane
+  member is added to the forge after a negative lookup, the next
+  resolution within the TTL window still returns "". Operators wait
+  out the 5-minute window or restart the bridge.
+- **No identity for system actors.** Plane's `Actor` on
+  system-generated events may be empty; the resolver falls through
+  to `WorkItem.CreatedBy` and then to the bot.
+- **First exact-email match wins.** A workspace with two members
+  sharing an email (rare; Plane normally prevents this) gets
+  whichever sort order the API returns. Static config overrides.
+
+### Sync-local `Member` type
+
+`ListWorkspaceMembers` returns the sync-local `Member` type (defined
+in `identity.go`), not `plane.Member`. This lets `internal/sync` land
+ahead of the sibling commit that adds `plane.Member` and
+`*plane.Client.ListWorkspaceMembers`. When that commit lands, the
+wiring layer in `internal/server` (or `cmd`) provides a thin adapter
+between `plane.Member` and the sync-local `Member`. Same staggering
+pattern as `ForgeIssueWriter` in step 10.
+
 ## Idempotency
 
 Two redeliveries of the same forge open event produce the same Plane work
@@ -505,6 +596,19 @@ target object ID until *after* it has run. The server records the
 `Outcome.WorkItemID` / `Outcome.CommentID` it gets back.
 
 ## Open questions
+
+### v2 OAuth identity handshake — resolved as "not needed for v2"
+
+The build order in [AGENTS.md](../../AGENTS.md#build-order) listed
+step 11 as "v2: OAuth identity handshake". A live discovery while
+implementing it: Plane's public workspace-members API does **not**
+expose OAuth-derived forge usernames, so the OAuth-handshake approach
+wouldn't have surfaced the identity information the bridge needs.
+Step 11 instead ships **email-based identity resolution** (see
+"v2 identity resolution" above), which covers the common case
+without an OAuth dance. A real OAuth handshake — needed only for
+multi-tenant heterogeneous-email scenarios where the bridge has to
+prove a user mapping rather than infer it — is deferred to v3.
 
 ### Comment identity mapping
 

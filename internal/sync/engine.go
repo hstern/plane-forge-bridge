@@ -45,6 +45,12 @@ type PlaneClient interface {
 	CreateComment(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
 	UpdateComment(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
+	// ListWorkspaceMembers powers the v2 identity resolver. Returns the
+	// workspace-scoped member list (small enough that fetching all is
+	// cheaper than per-email queries). The sync-local Member type is
+	// defined in identity.go; the production *plane.Client returns its
+	// sibling-package equivalent and the wiring layer adapts.
+	ListWorkspaceMembers(ctx context.Context) ([]Member, error)
 }
 
 // ForgeClient is the subset of the forge.Client REST API the sync engine
@@ -64,6 +70,10 @@ type ForgeClient interface {
 	CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
 	UpdateComment(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
 	DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
+	// SearchUsers powers the v2 identity resolver's plane→forge path.
+	// Upstream is a substring `?q=` search, so callers must filter the
+	// response for exact-email matches.
+	SearchUsers(ctx context.Context, query string) ([]forge.User, error)
 }
 
 // ForgeIssueWriter is the plane → forge issue write surface used by
@@ -152,6 +162,7 @@ type Engine struct {
 	stateCache      stateCache
 	labelCache      labelCache
 	forgeLabelCache forgeLabelCache
+	identityCache   identityCache
 }
 
 // NewEngine constructs an Engine from a PlaneClient, a ForgeClient (which
@@ -314,7 +325,7 @@ func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mappi
 		return nil, fmt.Errorf("sync: lookup before create: %w", err)
 	}
 
-	mapped, assignee := e.mappedAssignee(evt.Sender.Login)
+	mapped, _ := e.mappedAssignee(evt.Sender.Login)
 	desc := RenderDescription(
 		evt.Issue.Body,
 		evt.Sender.Login, evt.Sender.HTMLURL, evt.Repo.FullName,
@@ -326,6 +337,12 @@ func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mappi
 		ExternalSource:  source,
 		ExternalID:      id,
 	}
+	// v2 identity resolution: static config → email match → "". When the
+	// resolver returns "" the request omits Assignees, which lets Plane
+	// leave the work item unassigned (matching the v1 behaviour for
+	// unmapped users — the bridge bot is still the API caller, but it
+	// doesn't impose itself as the assignee).
+	assignee, _ := e.resolvePlaneMember(ctx, evt.Sender.Login, evt.Sender.Email)
 	if assignee != "" {
 		req.Assignees = []string{assignee}
 	}
@@ -498,9 +515,14 @@ func (e *Engine) reconcile(ctx context.Context, evt *forge.Event, link *mapping.
 	return &Outcome{Action: ActionUpdated, WorkItemID: wi.ID, Link: link}, nil
 }
 
-// mappedAssignee returns (true, planeMemberID) if the forge username has a
-// mapping, otherwise (false, bot.PlaneMemberID). The bool tells callers
-// whether to attach the unmapped-author preface to the body.
+// mappedAssignee is the v1 static-map-only identity check. It is kept as
+// the source of truth for the unmapped-author PREFACE: the preface fires
+// when the forge sender has no entry in the operator's static config,
+// regardless of whether the v2 email resolver later finds a Plane member
+// for them. This keeps the body attribution honest — the operator
+// configured the static map deliberately, the email match is a best-
+// effort fallback. Callers that want an assignee Plane member UUID
+// should use resolvePlaneMember (v1 + v2 + bot fallback) instead.
 func (e *Engine) mappedAssignee(forgeUsername string) (mapped bool, planeMemberID string) {
 	if id, ok := e.Users[forgeUsername]; ok && id != "" {
 		return true, id

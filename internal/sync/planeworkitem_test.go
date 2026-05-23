@@ -125,6 +125,48 @@ func TestHandlePlaneWorkItem_CreatedCreatesForgeIssue(t *testing.T) {
 	}
 }
 
+// TestHandlePlaneWorkItem_AssigneeResolvedFromForgeEmail is the v2
+// identity-resolver coverage on the plane → forge path. The actor's
+// plane member UUID is matched to a workspace member with email, that
+// email is searched on the forge, and the matching forge login lands
+// on the CreateIssueRequest.Assignees.
+func TestHandlePlaneWorkItem_AssigneeResolvedFromForgeEmail(t *testing.T) {
+	t.Parallel()
+	e, pc, fc := newPlaneWorkItemTestEngine(t)
+
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+		return []Member{
+			{ID: "actor-1", Email: "bob@example.com"},
+		}, nil
+	}
+	fc.SearchUsersFunc = func(_ context.Context, query string) ([]forge.User, error) {
+		if query != "bob@example.com" {
+			t.Errorf("SearchUsers query=%q, want bob@example.com", query)
+		}
+		return []forge.User{
+			{Login: "bob", Email: "bob@example.com"},
+		}, nil
+	}
+
+	evt := mkPlaneWorkItemEvent(plane.EventWorkItemCreated)
+	// The fixture's evt.Actor.ID is "actor-1"; the workspace member list
+	// above maps that UUID to bob@example.com.
+	out, err := e.HandlePlaneWorkItem(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionCreated {
+		t.Fatalf("Action=%v, want ActionCreated; reason=%q", out.Action, out.Reason)
+	}
+	if len(fc.IssueCreates) != 1 {
+		t.Fatalf("IssueCreates=%d, want 1", len(fc.IssueCreates))
+	}
+	got := fc.IssueCreates[0].Req.Assignees
+	if len(got) != 1 || got[0] != "bob" {
+		t.Errorf("Assignees=%v, want [bob]", got)
+	}
+}
+
 func TestHandlePlaneWorkItem_NoLinkSkips(t *testing.T) {
 	t.Parallel()
 	e, _, fc := newPlaneWorkItemTestEngine(t)
@@ -331,6 +373,9 @@ func (readOnlyForgeClient) UpdateComment(context.Context, string, string, int64,
 }
 func (readOnlyForgeClient) DeleteComment(context.Context, string, string, int64) error {
 	return nil
+}
+func (readOnlyForgeClient) SearchUsers(context.Context, string) ([]forge.User, error) {
+	return nil, nil
 }
 
 // --- PlaneRefMarker round-trip ---
