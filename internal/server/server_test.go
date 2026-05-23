@@ -31,7 +31,7 @@ func newTestServer(t *testing.T) *Server {
 	cfg.Plane.WebhookSecret = testPlaneSecret
 	cfg.Idemp.LRUCapacity = 64
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return New(cfg, logger)
+	return New(cfg, logger, nil)
 }
 
 func sign(secret string, body []byte) string {

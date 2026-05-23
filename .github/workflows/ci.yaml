@@ -105,13 +105,13 @@ jobs:
         with:
           version: v2.12.1
 
-  # End-to-end smoke. Brings up a forge service container (Forgejo or Gitea —
-  # matrixed because they share the same v1 webhook contract), launches the
-  # bridge from the build-image artifact as a host process, and asserts the
-  # webhook surface works: HMAC-verified events return 202, bad sigs return
-  # 401, healthz returns 200. The recorded-outbound-call assertion against
-  # plane-stub lands when step 6 (translation) does — the harness is in
-  # place to make that a small follow-up.
+  # End-to-end. Brings up a forge service container (Forgejo or Gitea —
+  # matrixed because they share the v1 webhook contract), runs the bridge
+  # and plane-stub as sibling containers attached to the forge service's
+  # auto-generated network so the forge can POST webhooks to the bridge by
+  # container name. Seeds a repo + webhook, creates an issue via REST, and
+  # asserts the bridge translated it into a recorded POST against
+  # plane-stub with the loop-break marker present.
   e2e-docker:
     name: e2e-docker (${{ matrix.forge.name }})
     needs: build-image
@@ -123,8 +123,10 @@ jobs:
         forge:
           - name: forgejo
             image: codeberg.org/forgejo/forgejo:15
+            flavor: forgejo
           - name: gitea
             image: gitea/gitea:1.22
+            flavor: gitea
     services:
       forge:
         image: ${{ matrix.forge.image }}
@@ -136,13 +138,23 @@ jobs:
           FORGEJO__server__ROOT_URL: "http://localhost:3000/"
           FORGEJO__server__HTTP_PORT: "3000"
           FORGEJO__server__DOMAIN: "localhost"
+          # Webhooks default to refusing delivery to private/unknown hosts.
+          # In CI the bridge is reachable only as the container name `bridge`
+          # on the docker network, so we open the allowlist. Not appropriate
+          # for production.
+          FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
           GITEA__security__INSTALL_LOCK: "true"
           GITEA__server__ROOT_URL: "http://localhost:3000/"
           GITEA__server__HTTP_PORT: "3000"
           GITEA__server__DOMAIN: "localhost"
+          GITEA__webhook__ALLOWED_HOST_LIST: "*"
     env:
       FORGE_URL: http://localhost:3000
-      PFB_FORGE_TOKEN: ci-forge-token-${{ github.run_id }}
+      FORGE_ADMIN_USER: pfbadmin
+      FORGE_ADMIN_PASS: pfb-CI-Pass-1!
+      FORGE_ADMIN_EMAIL: pfbadmin@example.com
+      FORGE_ORG: pfborg
+      FORGE_REPO: pfbrepo
       PFB_FORGE_WEBHOOK_SECRET: ci-forge-secret-${{ github.run_id }}
       PFB_PLANE_API_KEY: ci-plane-key-${{ github.run_id }}
       PFB_PLANE_WEBHOOK_SECRET: ci-plane-secret-${{ github.run_id }}
@@ -156,65 +168,109 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull the bridge image build-image just pushed and extract its binary.
-      # Run as a host process: the e2e harness reads the bridge's stdout and
-      # the bridge needs to listen on a port the runner can reach. Wrapping
-      # it in `docker run` would just add bind-mounts.
-      - name: Pull built image and extract bridge binary
+      - name: Identify forge service container
+        id: forge
+        # The forge runs as a GitHub Actions `services:` container; the
+        # bridge and plane-stub need to join its auto-generated network so
+        # the forge can address the bridge by container name when posting
+        # webhooks.
         run: |
           set -euo pipefail
-          image='${{ needs.build-image.outputs.image }}'
-          echo "consuming image: $image"
-          docker pull "$image"
-          cid=$(docker create "$image")
-          docker cp "$cid:/plane-forge-bridge" ./plane-forge-bridge
-          docker rm "$cid" >/dev/null
-          chmod +x ./plane-forge-bridge
+          cid=$(docker ps --filter "ancestor=${{ matrix.forge.image }}" -q | head -n1)
+          if [ -z "$cid" ]; then
+            echo "ERROR: forge service container not found"
+            docker ps -a
+            exit 1
+          fi
+          cname=$(docker inspect -f '{{.Name}}' "$cid" | sed 's|^/||')
+          net=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" | tr ' ' '\n' | grep -vE '^(bridge|host|none|)$' | head -n1)
+          if [ -z "$net" ]; then net=bridge; fi
+          echo "forge container=$cname network=$net"
+          echo "name=$cname"   >> "$GITHUB_OUTPUT"
+          echo "network=$net" >> "$GITHUB_OUTPUT"
 
-      - name: Start plane-stub
+      - name: Start plane-stub on the forge network
         run: |
           set -euo pipefail
           docker pull '${{ needs.build-image.outputs.stub_image }}'
-          docker run -d --name plane-stub -p 8081:8080 \
-            '${{ needs.build-image.outputs.stub_image }}'
-          # Wait for healthz.
+          docker run -d --name plane-stub --network '${{ steps.forge.outputs.network }}' \
+            -p 8081:8080 '${{ needs.build-image.outputs.stub_image }}'
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8081/_/healthz >/dev/null 2>&1; then
               echo "plane-stub healthy after ${i}s"; break
             fi
             sleep 1
           done
+          curl -fsS http://localhost:8081/_/healthz
 
       - name: Write bridge config
+        env:
+          FORGE_INTERNAL_HOST: ${{ steps.forge.outputs.name }}
         run: |
           set -euo pipefail
-          umask 077
-          cat > config.yaml <<'YAML'
-          listen: "127.0.0.1:8080"
+          # The bridge config uses container names (resolved on the docker
+          # network) for both the forge URL (outbound, when step 10 lands)
+          # and the plane URL. The bridge listens on 0.0.0.0 inside its
+          # container so the forge can reach it as http://bridge:8080.
+          # The plane_project_id is a synthetic UUID — plane-stub doesn't
+          # care, the asserter only checks the URL shape + body fields.
+          cat > config.yaml <<YAML
+          listen: "0.0.0.0:8080"
           log_level: debug
           forge:
-            base_url: http://localhost:3000
+            base_url: http://${FORGE_INTERNAL_HOST}:3000
             token_env: PFB_FORGE_TOKEN
             webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
           plane:
-            base_url: http://localhost:8081/api/v1
+            base_url: http://plane-stub:8080/api/v1
             workspace_slug: ci
             api_key_env: PFB_PLANE_API_KEY
             webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
           bridge_bot:
             forge_username: pfb-bot
             plane_member_id: 00000000-0000-0000-0000-000000000000
-          links: []
+          links:
+            - forge_repo: ${FORGE_ORG}/${FORGE_REPO}
+              plane_project_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+              state_map: {}
           users: {}
           YAML
 
-      - name: Launch bridge
+      - name: Pull bridge image (with retry against ghcr transient denies)
         run: |
           set -euo pipefail
-          ./plane-forge-bridge --config "$PWD/config.yaml" \
-            > bridge.stdout 2> bridge.log &
-          echo $! > bridge.pid
-          # Wait for the bridge to bind.
+          image='${{ needs.build-image.outputs.image }}'
+          # ghcr.io intermittently returns "denied: denied" on freshly-pushed
+          # multi-arch manifests for a few seconds after the push. Re-login
+          # and retry up to 6 times with backoff before giving up.
+          for i in 1 2 3 4 5 6; do
+            if docker pull "$image"; then
+              echo "pulled after $i attempt(s)"; exit 0
+            fi
+            echo "pull failed; re-authenticating and retrying in $((i*5))s"
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            sleep $((i*5))
+          done
+          echo "ERROR: docker pull never succeeded"
+          exit 1
+
+      - name: Launch bridge on the forge network
+        run: |
+          set -euo pipefail
+          # We set PFB_FORGE_TOKEN after Forgejo is seeded (next step) and
+          # pass it via env. Mock it for now so the config loader's
+          # ErrSecretMissing check passes; the real value flows in from the
+          # seed step.
+          docker run -d --name bridge \
+            --network '${{ steps.forge.outputs.network }}' \
+            -p 8080:8080 \
+            -v "$PWD/config.yaml:/etc/pfb/config.yaml:ro" \
+            -e PFB_FORGE_TOKEN=placeholder-set-after-seed \
+            -e PFB_FORGE_WEBHOOK_SECRET="$PFB_FORGE_WEBHOOK_SECRET" \
+            -e PFB_PLANE_API_KEY="$PFB_PLANE_API_KEY" \
+            -e PFB_PLANE_WEBHOOK_SECRET="$PFB_PLANE_WEBHOOK_SECRET" \
+            '${{ needs.build-image.outputs.image }}' \
+            --config /etc/pfb/config.yaml
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
               echo "bridge healthy after ${i}s"; break
@@ -223,7 +279,7 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8080/healthz
 
-      - name: Smoke — verify webhook accepts a valid signature
+      - name: Smoke — webhook 202 on valid signature (direct POST)
         env:
           FORGE_SECRET: ${{ env.PFB_FORGE_WEBHOOK_SECRET }}
         run: |
@@ -234,15 +290,13 @@ jobs:
             -X POST http://127.0.0.1:8080/forge/webhook \
             -H "X-Gitea-Signature: $sig" \
             -H "X-Gitea-Event: issues" \
-            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-valid" \
+            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-direct-valid" \
             -H 'Content-Type: application/json' \
             --data-binary "$body")
           echo "status=$status body=$(cat /tmp/resp)"
-          if [ "$status" != "202" ]; then
-            echo "ERROR: expected 202 Accepted, got $status"; exit 1
-          fi
+          [ "$status" = "202" ] || { echo "ERROR: expected 202, got $status"; exit 1; }
 
-      - name: Smoke — verify webhook rejects an invalid signature
+      - name: Smoke — webhook 401 on invalid signature (direct POST)
         run: |
           set -euo pipefail
           body=$(cat internal/forge/testdata/issues_opened.json)
@@ -250,47 +304,107 @@ jobs:
             -X POST http://127.0.0.1:8080/forge/webhook \
             -H 'X-Gitea-Signature: deadbeef' \
             -H 'X-Gitea-Event: issues' \
-            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-invalid" \
+            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-direct-invalid" \
             -H 'Content-Type: application/json' \
             --data-binary "$body")
-          echo "status=$status body=$(cat /tmp/resp)"
-          if [ "$status" != "401" ]; then
-            echo "ERROR: expected 401 Unauthorized, got $status"; exit 1
-          fi
+          [ "$status" = "401" ] || { echo "ERROR: expected 401, got $status"; exit 1; }
 
-      - name: Smoke — verify plane-stub recorded no calls yet
-        # Until step 6 wires translation, the bridge should not POST to plane.
-        # When translation lands, expand this step to: create issue in forge
-        # via REST → wait for webhook → query /_/recorded → assert one POST.
+      - name: Seed forge with org + repo + webhook
+        id: seed
+        env:
+          FORGE_CONTAINER: ${{ steps.forge.outputs.name }}
+          FORGE_FLAVOR: ${{ matrix.forge.flavor }}
+          BRIDGE_WEBHOOK_URL: http://bridge:8080/forge/webhook
         run: |
           set -euo pipefail
-          recorded=$(curl -sS http://localhost:8081/_/recorded | jq 'length')
-          echo "plane-stub recorded $recorded call(s)"
-          if [ "$recorded" -ne 0 ]; then
-            echo "ERROR: bridge made unexpected outbound calls before translation lands"
-            curl -sS http://localhost:8081/_/recorded | jq .
+          chmod +x test/e2e-docker/seed.sh
+          token=$(bash test/e2e-docker/seed.sh)
+          echo "::add-mask::$token"
+          # Reload the bridge with the real forge token so future outbound
+          # forge calls (step 10+) will be authorized. Step 6 only does
+          # forge→plane so the token is currently unused by the bridge,
+          # but plumbing it in now keeps the integration path warm.
+          docker rm -f bridge >/dev/null
+          docker run -d --name bridge \
+            --network '${{ steps.forge.outputs.network }}' \
+            -p 8080:8080 \
+            -v "$PWD/config.yaml:/etc/pfb/config.yaml:ro" \
+            -e PFB_FORGE_TOKEN="$token" \
+            -e PFB_FORGE_WEBHOOK_SECRET="$PFB_FORGE_WEBHOOK_SECRET" \
+            -e PFB_PLANE_API_KEY="$PFB_PLANE_API_KEY" \
+            -e PFB_PLANE_WEBHOOK_SECRET="$PFB_PLANE_WEBHOOK_SECRET" \
+            '${{ needs.build-image.outputs.image }}' \
+            --config /etc/pfb/config.yaml
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "bridge healthy after ${i}s"; break
+            fi
+            sleep 1
+          done
+          echo "FORGE_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Create an issue via forge REST API
+        id: issue
+        run: |
+          set -euo pipefail
+          # Don't use -f so we get the response body on non-2xx for diagnosis.
+          http_code=$(curl -sS -o /tmp/issue.json -w '%{http_code}' \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d '{"title":"e2e: hello from CI","body":"This issue triggers the forge→plane translator."}' \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/issues")
+          echo "POST /issues status=$http_code"
+          cat /tmp/issue.json | head -c 2000; echo
+          if [ "$http_code" != "201" ]; then
+            echo "ERROR: issue creation returned $http_code"
             exit 1
           fi
+          issue_id=$(jq -r .id /tmp/issue.json)
+          issue_number=$(jq -r .number /tmp/issue.json)
+          echo "created issue id=$issue_id number=$issue_number"
+          if [ -z "$issue_id" ] || [ "$issue_id" = "null" ]; then
+            echo "ERROR: issue creation returned no id"
+            exit 1
+          fi
+          echo "id=$issue_id"         >> "$GITHUB_OUTPUT"
+          echo "number=$issue_number" >> "$GITHUB_OUTPUT"
+
+      - name: Assert plane-stub recorded the create
+        env:
+          PLANE_STUB_URL: http://localhost:8081
+          FORGE_ISSUE_ID: ${{ steps.issue.outputs.id }}
+          ISSUE_WAIT_SEC: 60
+        run: |
+          set -euo pipefail
+          chmod +x test/e2e-docker/assert.sh
+          bash test/e2e-docker/assert.sh
 
       - name: Capture diagnostics on failure
         if: failure()
         run: |
-          echo "===== bridge.log ====="; cat bridge.log || true
-          echo "===== bridge.stdout ====="; cat bridge.stdout || true
+          echo "===== bridge container log ====="; docker logs bridge 2>&1 | tail -200 || true
           echo "===== plane-stub container log ====="; docker logs plane-stub 2>&1 | tail -200 || true
-          echo "===== forge container log ====="
-          cid=$(docker ps --filter "ancestor=${{ matrix.forge.image }}" -q | head -n1)
-          [ -n "$cid" ] && docker logs "$cid" 2>&1 | tail -200 || echo "(no forge container)"
+          echo "===== forge container log ====="; docker logs '${{ steps.forge.outputs.name }}' 2>&1 | tail -200 || true
+          echo "===== recorded plane-stub calls ====="; curl -fsS http://localhost:8081/_/recorded | jq . || true
+          echo "===== config.yaml ====="; cat config.yaml || true
 
       - name: Upload diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker logs bridge      > artifacts/bridge.log     2>&1 || true
+          docker logs plane-stub  > artifacts/plane-stub.log 2>&1 || true
+          docker logs '${{ steps.forge.outputs.name }}' > artifacts/forge.log 2>&1 || true
+          curl -fsS http://localhost:8081/_/recorded > artifacts/recorded.json 2>/dev/null || true
+          cp config.yaml artifacts/ || true
+
+      - name: Upload diagnostics artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-docker-${{ matrix.forge.name }}-logs
-          path: |
-            bridge.log
-            bridge.stdout
-            config.yaml
+          path: artifacts/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -298,11 +412,7 @@ jobs:
         if: always()
         run: |
           set +e
-          if [ -f bridge.pid ]; then
-            kill "$(cat bridge.pid)" 2>/dev/null
-            sleep 2
-            kill -9 "$(cat bridge.pid)" 2>/dev/null
-          fi
+          docker rm -f bridge 2>/dev/null
           docker rm -f plane-stub 2>/dev/null
 
   # Publish on push to main (rolling `:latest`) and on v* tag pushes (semver

@@ -177,6 +177,20 @@ func handleAPI(rec *recorder, logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 
+		// GETs are treated as lookups. The bridge calls
+		// GetIssueByExternalRef before deciding to create vs update; the
+		// stub answers "not found" so the bridge always takes the create
+		// path. A smarter stub could remember POSTed work items and return
+		// them here, but that adds state for no e2e value — the asserter
+		// reads the recorded calls directly.
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"detail": "not found",
+				"path":   r.URL.Path,
+			}, logger)
+			return
+		}
+
 		id, err := newUUID()
 		if err != nil {
 			logger.Error("uuid", "err", err.Error())

@@ -1,7 +1,7 @@
 // Package server wires the HTTP routes (/forge/webhook, /plane/webhook,
 // /healthz) onto the verified+parsed events from internal/forge and
-// internal/plane. Step 2 in the build order: verify, parse, structured-log,
-// 202 Accepted. Translation is added in later steps.
+// internal/plane, then hands forge issue events to a Translator
+// (internal/sync) for outbound writes to Plane.
 package server
 
 import (
@@ -16,7 +16,15 @@ import (
 	"github.com/hstern/plane-forge-bridge/internal/idemp"
 	"github.com/hstern/plane-forge-bridge/internal/mapping"
 	"github.com/hstern/plane-forge-bridge/internal/plane"
+	pfbsync "github.com/hstern/plane-forge-bridge/internal/sync"
 )
+
+// Translator is the surface server uses to translate a parsed forge event
+// into outbound Plane calls. Production wires this to *sync.Engine; tests
+// substitute a hand-written fake.
+type Translator interface {
+	HandleForgeIssue(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
+}
 
 // maxBodyBytes caps webhook bodies. Gitea/Forgejo and Plane payloads are well
 // under this in practice — the cap is defence-in-depth against a misconfigured
@@ -26,26 +34,28 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // Server is the HTTP server fronting both webhook endpoints. Construct with
 // New; the returned value implements http.Handler.
 type Server struct {
-	cfg    *mapping.Resolved
-	log    *slog.Logger
-	mux    *http.ServeMux
-	dedupe *idemp.LRU
-	clock  func() time.Time
+	cfg        *mapping.Resolved
+	log        *slog.Logger
+	mux        *http.ServeMux
+	dedupe     *idemp.LRU
+	translator Translator
+	clock      func() time.Time
 }
 
 // New returns a Server wired to cfg, logger, and a freshly-sized loop-break
-// LRU. The logger is used for all request-scoped logging; pass slog.Default
-// if you don't have a project logger yet.
-func New(cfg *mapping.Resolved, log *slog.Logger) *Server {
+// LRU. The translator may be nil — handlers will then verify+log+202 without
+// outbound calls (useful in tests and during smoke deploys).
+func New(cfg *mapping.Resolved, log *slog.Logger, translator Translator) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	s := &Server{
-		cfg:    cfg,
-		log:    log,
-		mux:    http.NewServeMux(),
-		dedupe: idemp.NewLRU(cfg.Idemp.LRUCapacity),
-		clock:  time.Now,
+		cfg:        cfg,
+		log:        log,
+		mux:        http.NewServeMux(),
+		dedupe:     idemp.NewLRU(cfg.Idemp.LRUCapacity),
+		translator: translator,
+		clock:      time.Now,
 	}
 	s.mux.HandleFunc("POST /forge/webhook", s.handleForge)
 	s.mux.HandleFunc("POST /plane/webhook", s.handlePlane)
@@ -89,7 +99,56 @@ func (s *Server) handleForge(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if s.translator != nil && isForgeIssueEvent(evt.Kind) {
+		outcome, terr := s.translator.HandleForgeIssue(r.Context(), evt)
+		if terr != nil {
+			s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed",
+				slog.String("delivery_id", evt.DeliveryID),
+				slog.String("err", terr.Error()),
+			)
+			http.Error(w, "translator error", http.StatusInternalServerError)
+			return
+		}
+		s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge event translated",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("action", actionString(outcome.Action)),
+			slog.String("work_item_id", outcome.WorkItemID),
+			slog.String("reason", outcome.Reason),
+		)
+		if outcome.WorkItemID != "" {
+			// Record (sourceEventID, targetObjID) so an echoed Plane webhook
+			// caused by this write can be dropped via the LRU even if the
+			// marker is stripped downstream.
+			s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.WorkItemID)
+		}
+	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// isForgeIssueEvent reports whether a forge event is one the issue translator
+// handles. Other kinds (push, pull_request_review, etc.) are accepted by the
+// webhook endpoint but not dispatched to translation in step 6.
+func isForgeIssueEvent(k forge.EventKind) bool {
+	switch k {
+	case forge.EventIssueOpened, forge.EventIssueEdited, forge.EventIssueClosed,
+		forge.EventIssueReopened:
+		return true
+	default:
+		return false
+	}
+}
+
+func actionString(a pfbsync.Action) string {
+	switch a {
+	case pfbsync.ActionCreated:
+		return "created"
+	case pfbsync.ActionUpdated:
+		return "updated"
+	case pfbsync.ActionSkipped:
+		return "skipped"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Server) handlePlane(w http.ResponseWriter, r *http.Request) {
