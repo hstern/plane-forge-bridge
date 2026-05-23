@@ -74,7 +74,7 @@ token_response=$(
   curl -fsS -u "$FORGE_ADMIN_USER:$FORGE_ADMIN_PASS" \
     -H 'Content-Type: application/json' \
     -X POST \
-    -d "{\"name\":\"$token_name\",\"scopes\":[\"write:admin\",\"write:repository\",\"write:organization\",\"write:user\"]}" \
+    -d "{\"name\":\"$token_name\",\"scopes\":[\"write:admin\",\"write:repository\",\"write:issue\",\"write:organization\",\"write:user\"]}" \
     "$FORGE_URL/api/v1/users/$FORGE_ADMIN_USER/tokens"
 )
 api_token=$(printf '%s' "$token_response" | jq -r .sha1)

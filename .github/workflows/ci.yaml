@@ -323,17 +323,24 @@ jobs:
         id: issue
         run: |
           set -euo pipefail
-          resp=$(curl -fsS \
+          # Don't use -f so we get the response body on non-2xx for diagnosis.
+          http_code=$(curl -sS -o /tmp/issue.json -w '%{http_code}' \
             -H "Authorization: token $FORGE_TOKEN" \
             -H 'Content-Type: application/json' \
             -X POST \
             -d '{"title":"e2e: hello from CI","body":"This issue triggers the forge→plane translator."}' \
             "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/issues")
-          issue_id=$(printf '%s' "$resp" | jq -r .id)
-          issue_number=$(printf '%s' "$resp" | jq -r .number)
+          echo "POST /issues status=$http_code"
+          cat /tmp/issue.json | head -c 2000; echo
+          if [ "$http_code" != "201" ]; then
+            echo "ERROR: issue creation returned $http_code"
+            exit 1
+          fi
+          issue_id=$(jq -r .id /tmp/issue.json)
+          issue_number=$(jq -r .number /tmp/issue.json)
           echo "created issue id=$issue_id number=$issue_number"
           if [ -z "$issue_id" ] || [ "$issue_id" = "null" ]; then
-            echo "ERROR: issue creation returned no id; response: $resp"
+            echo "ERROR: issue creation returned no id"
             exit 1
           fi
           echo "id=$issue_id"         >> "$GITHUB_OUTPUT"
