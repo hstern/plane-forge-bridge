@@ -165,6 +165,12 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 	if err != nil {
 		return fmt.Errorf("plane: new request: %w", err)
 	}
+	// Plane's APIKeyAuthentication middleware reads X-Api-Key for
+	// personal/workspace API tokens (see makeplane/plane
+	// apps/api/plane/api/middleware/api_authentication.py). Authorization
+	// Bearer is for OAuth access tokens only. Sending both is harmless and
+	// makes the client work against either deployment.
+	req.Header.Set("X-Api-Key", c.APIKey)
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent())

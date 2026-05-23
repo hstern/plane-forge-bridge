@@ -35,11 +35,16 @@ publicly developed, no per-seat licensing.
 
 One stateless Go binary. Two HTTP webhook endpoints — `/forge/webhook` for
 Forgejo/Gitea and `/plane/webhook` for Plane — and two outbound REST clients,
-one per side. Configuration and secrets come in via a YAML file and
-environment variables; nothing is persisted to disk between requests. A small
-in-memory LRU tracks recently-bridged events to guard against echoes (see
-[Loop-break design](#loop-break-design)). Restarting the process loses the
-LRU but not correctness — the loop-break marker is the durable defense.
+one per side. A translator (`internal/sync`) sits between the webhook
+handlers and the REST clients; it picks the configured `link` for an
+incoming event, decides create-vs-update by looking up the existing Plane
+work item via its `external_source` + `external_id`, wraps the description
+body with the loop-break marker, and posts. Configuration and secrets come
+in via a YAML file and environment variables; nothing is persisted to disk
+between requests. A small in-memory LRU tracks recently-bridged events to
+guard against echoes (see [Loop-break design](#loop-break-design)).
+Restarting the process loses the LRU but not correctness — the loop-break
+marker is the durable defense.
 
 ```mermaid
 flowchart LR
@@ -158,9 +163,13 @@ account and includes a one-line attribution at the top of the body
 unreliable in exactly the case — a new contributor — where reliability
 matters most.
 
-v2 will add a per-user OAuth handshake at a `/connect` endpoint, with the
-resulting mapping persisted somewhere durable. That is out of scope until v1
-is working end-to-end; the v1 static table is a deliberate simplification.
+v2's plan is simpler than originally scoped. Plane ships built-in OAuth
+support for **Gitea (and therefore Forgejo) as an identity provider**, so
+operators who let their users sign in to Plane via the forge already have
+the mapping in Plane's member metadata. v2 will read the forge identity off
+the Plane workspace-members API rather than build a custom `/connect`
+handshake. The static config table from v1 remains as the fallback for
+members who didn't sign in via the Gitea provider (e.g. password signup).
 
 # State mapping
 
@@ -299,20 +308,23 @@ The build order from the scaffolding brief:
 
 1. Skeleton — LICENSE, README, AGENTS.md. ← *done*
 2. `cmd/main.go` + minimal HTTP server with HMAC-verified webhook
-   endpoints.
+   endpoints. ← *done*
 3. `internal/forge` + `internal/plane` parse and verify, unit tests
-   against captured payload fixtures.
-4. Multi-stage Dockerfile + `test/e2e-docker/plane-stub`.
-5. `.github/workflows/ci.yaml` modeled on `fj-bellows`.
-6. Issue create/update/close translation (forge → plane).
+   against captured payload fixtures. ← *done*
+4. Multi-stage Dockerfile + `test/e2e-docker/plane-stub`. ← *done*
+5. `.github/workflows/ci.yaml` modeled on `fj-bellows`. ← *done*
+6. Issue create/update/close translation (forge → plane). ← *done*
 7. Comments both ways with loop-break marker.
 8. Labels + state mapping.
 9. PR / branch → work-item state automation.
 10. Plane → forge direction.
-11. v2: OAuth identity handshake.
+11. v2: Plane→workspace-members API for identity (no custom OAuth needed —
+    Plane already supports Gitea/Forgejo as an authn provider, so the
+    forge identity is already in Plane's member metadata for users who
+    signed in via the provider; static config remains the fallback).
 
-We are at step 1. This list is the running progress tracker — update it as
-steps complete so the doc shows where the project actually is.
+This list is the running progress tracker — update it as steps complete so
+the doc shows where the project actually is.
 
 # Out of scope for v1
 

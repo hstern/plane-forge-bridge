@@ -10,13 +10,17 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hstern/plane-forge-bridge/internal/mapping"
+	"github.com/hstern/plane-forge-bridge/internal/plane"
 	"github.com/hstern/plane-forge-bridge/internal/server"
+	pfbsync "github.com/hstern/plane-forge-bridge/internal/sync"
 )
 
 // version is the build version, injected via -ldflags="-X main.version=...".
@@ -54,7 +58,12 @@ func run(args []string, stdout, stderr *os.File) error {
 		slog.String("listen", cfg.Listen),
 	)
 
-	srv := server.New(cfg, logger)
+	planeClient := plane.NewClient(cfg.Plane.BaseURL, cfg.Plane.WorkspaceSlug, cfg.Plane.APIKey,
+		&http.Client{Timeout: 30 * time.Second})
+	planeClient.UserAgent = "plane-forge-bridge/" + version
+
+	translator := pfbsync.NewEngine(planeClient, cfg, logger)
+	srv := server.New(cfg, logger, translator)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

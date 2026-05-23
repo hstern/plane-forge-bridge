@@ -116,10 +116,11 @@ Sentinel errors:
 ## Client (outbound REST)
 
 `Client` speaks Plane's "v1" REST API and is the bridge's outbound write
-path. All four methods take a `context.Context`, set
-`Authorization: Bearer <APIKey>`, `Accept: application/json`,
-`User-Agent: <Client.UserAgent or "plane-forge-bridge">`, and
-`Content-Type: application/json` on bodies. Responses are size-capped at
+path. All four methods take a `context.Context`, set both
+`X-Api-Key: <APIKey>` (workspace/personal API tokens) and
+`Authorization: Bearer <APIKey>` (OAuth access tokens), `Accept:
+application/json`, `User-Agent: <Client.UserAgent or
+"plane-forge-bridge">`, and `Content-Type: application/json` on bodies. Responses are size-capped at
 4 MiB; non-2xx responses become `*APIError` with up to 4 KiB of the
 response body preserved for diagnosis.
 
@@ -162,13 +163,13 @@ under-specifies the list endpoint:
    decodes only `results`; we read the first page only because Plane
    projects rarely have more than a handful of states. Source:
    `apps/api/plane/utils/paginator.py`.
-3. **Authentication header.** Plane's API supports two auth schemes:
-   `X-Api-Key: <token>` for personal/workspace API tokens and
-   `Authorization: Bearer <token>` for OAuth access tokens. The
-   bridge sends the Bearer form per the project spec; if a deployment
-   uses a long-lived API key against the public Plane.so SaaS that
-   only accepts `X-Api-Key`, the `Client` will need a follow-up to
-   add that header alongside (or instead of) `Authorization`.
+3. **Authentication headers.** Plane's API supports two auth schemes:
+   `X-Api-Key: <token>` for personal/workspace API tokens (the bridge's
+   usual deployment) and `Authorization: Bearer <token>` for OAuth
+   access tokens. The client sends both on every request so the same
+   `Client.APIKey` works against either deployment shape without a
+   config switch. Source: `makeplane/plane`
+   `apps/api/plane/api/middleware/api_authentication.py`.
 4. **Trailing slashes are mandatory.** Plane's URLConf does not redirect
    missing trailing slashes; the client constructs every path with one.
 

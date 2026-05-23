@@ -397,7 +397,7 @@ func TestHandle_PreservesIdempotency(t *testing.T) {
 func TestHandle_PropagatesPlaneError(t *testing.T) {
 	t.Parallel()
 	e, fc := newTestEngine(t)
-	apiErr := &plane.APIError{StatusCode: 500, Method: "POST", URL: "/api/issues", Body: "boom"}
+	apiErr := &plane.APIError{StatusCode: 500, Method: "POST", Path: "/api/issues", Body: "boom"}
 	fc.CreateIssueFunc = func(_ context.Context, _ string, _ plane.CreateIssueRequest) (*plane.WorkItem, error) {
 		return nil, apiErr
 	}

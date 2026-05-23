@@ -27,6 +27,9 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 // assertCommonHeaders checks the headers every request must carry.
 func assertCommonHeaders(t *testing.T, r *http.Request) {
 	t.Helper()
+	if got, want := r.Header.Get("X-Api-Key"), "test-token"; got != want {
+		t.Errorf("X-Api-Key header = %q, want %q", got, want)
+	}
 	if got, want := r.Header.Get("Authorization"), "Bearer test-token"; got != want {
 		t.Errorf("Authorization header = %q, want %q", got, want)
 	}

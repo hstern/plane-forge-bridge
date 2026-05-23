@@ -226,7 +226,9 @@ func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mappi
 		DescriptionHTML: desc,
 		ExternalSource:  source,
 		ExternalID:      id,
-		CreatedBy:       assignee,
+	}
+	if assignee != "" {
+		req.Assignees = []string{assignee}
 	}
 	if stateID, err := e.ResolveStateID(ctx, link, "open"); err != nil {
 		return nil, fmt.Errorf("sync: resolve open state: %w", err)

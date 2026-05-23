@@ -240,6 +240,25 @@ func TestIsKnownAPIPath(t *testing.T) {
 	}
 }
 
+// GET on an issues endpoint with external_id/external_source must return 404
+// — the bridge's GetIssueByExternalRef uses 404 as ErrNotFound, which is the
+// signal to take the create path. If the stub ever starts answering 200
+// here, the e2e job will fail because the bridge will try to update a work
+// item that was never created.
+func TestGetOnAPIPathReturns404(t *testing.T) {
+	srv := httptest.NewServer(newMux(&recorder{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/api/v1/workspaces/ci/projects/abc/issues/?external_id=42&external_source=forge")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestResolveListen(t *testing.T) {
 	if got := resolveListen("", ""); got != ":8080" {
 		t.Errorf("default = %q, want :8080", got)
