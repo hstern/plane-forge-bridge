@@ -25,9 +25,10 @@ type fakeTranslator struct {
 	plane []*plane.Event // plane comment events
 
 	// Overrides; nil for any means "return a sensible default outcome".
-	respondForgeIssue   func(evt *forge.Event) (*pfbsync.Outcome, error)
-	respondForgeComment func(evt *forge.Event) (*pfbsync.Outcome, error)
-	respondPlaneComment func(evt *plane.Event) (*pfbsync.Outcome, error)
+	respondForgeIssue       func(evt *forge.Event) (*pfbsync.Outcome, error)
+	respondForgeComment     func(evt *forge.Event) (*pfbsync.Outcome, error)
+	respondForgePullRequest func(evt *forge.Event) (*pfbsync.Outcome, error)
+	respondPlaneComment     func(evt *plane.Event) (*pfbsync.Outcome, error)
 }
 
 func (f *fakeTranslator) HandleForgeIssue(_ context.Context, evt *forge.Event) (*pfbsync.Outcome, error) {
@@ -48,6 +49,16 @@ func (f *fakeTranslator) HandleForgeComment(_ context.Context, evt *forge.Event)
 		return f.respondForgeComment(evt)
 	}
 	return &pfbsync.Outcome{Action: pfbsync.ActionCreated, WorkItemID: "wi-default", CommentID: "comment-default"}, nil
+}
+
+func (f *fakeTranslator) HandleForgePullRequest(_ context.Context, evt *forge.Event) (*pfbsync.Outcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, evt)
+	if f.respondForgePullRequest != nil {
+		return f.respondForgePullRequest(evt)
+	}
+	return &pfbsync.Outcome{Action: pfbsync.ActionUpdated, WorkItemID: "wi-pr-default"}, nil
 }
 
 func (f *fakeTranslator) HandlePlaneComment(_ context.Context, evt *plane.Event) (*pfbsync.Outcome, error) {
@@ -278,6 +289,54 @@ func TestPlaneWebhook_CommentTranslateError_500(t *testing.T) {
 	req.Header.Set(plane.HeaderSignature, sig)
 	req.Header.Set(plane.HeaderEvent, "issue_comment")
 	req.Header.Set(plane.HeaderDelivery, "plane-comment-boom")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestForgeWebhook_DispatchesPullRequestToTranslator(t *testing.T) {
+	ft := &fakeTranslator{
+		respondForgePullRequest: func(_ *forge.Event) (*pfbsync.Outcome, error) {
+			return &pfbsync.Outcome{Action: pfbsync.ActionUpdated, WorkItemID: "wi-pr-1"}, nil
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../forge/testdata/pull_request_opened.json")
+	sig := sign(testForgeSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/forge/webhook", bytes.NewReader(body))
+	req.Header.Set(forge.HeaderSignature, sig)
+	req.Header.Set(forge.HeaderEvent, "pull_request")
+	req.Header.Set(forge.HeaderDelivery, "delivery-pr-1")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d want %d (body=%s)", rr.Code, http.StatusAccepted, rr.Body.String())
+	}
+	if ft.callCount() != 1 {
+		t.Fatalf("translator calls: got %d want 1", ft.callCount())
+	}
+	if !s.dedupe.Seen(idemp.SourceForge, "delivery-pr-1", "wi-pr-1") {
+		t.Error("LRU should have recorded (forge, delivery-pr-1, wi-pr-1)")
+	}
+}
+
+func TestForgeWebhook_PullRequestTranslateError_500(t *testing.T) {
+	ft := &fakeTranslator{
+		respondForgePullRequest: func(_ *forge.Event) (*pfbsync.Outcome, error) {
+			return nil, errors.New("pr translator boom")
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../forge/testdata/pull_request_opened.json")
+	sig := sign(testForgeSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/forge/webhook", bytes.NewReader(body))
+	req.Header.Set(forge.HeaderSignature, sig)
+	req.Header.Set(forge.HeaderEvent, "pull_request")
+	req.Header.Set(forge.HeaderDelivery, "delivery-pr-boom")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {

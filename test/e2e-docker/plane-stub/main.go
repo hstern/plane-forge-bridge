@@ -192,9 +192,27 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 				}, logger)
 				return
 			case isStatesCollection(r.URL.Path):
+				// Serve a fixed three-state set so the bridge's
+				// ResolveStateID call can find configured state names.
+				// The UUIDs are stable for assertions.
 				writeJSON(w, http.StatusOK, map[string]any{
-					"results":     []any{},
-					"total_count": 0,
+					"results":     fixedStates,
+					"total_count": len(fixedStates),
+				}, logger)
+				return
+			case isWorkItemLookup(r.URL.Path):
+				// Workspace-level lookup by identifier-sequence. The stub
+				// returns the most-recently-POSTed work item, ignoring the
+				// identifier+sequence in the URL — sufficient for the
+				// single-issue e2e flow. Returns 404 if nothing has been
+				// created yet.
+				if wi, ok := store.last(); ok {
+					writeJSON(w, http.StatusOK, wi, logger)
+					return
+				}
+				writeJSON(w, http.StatusNotFound, map[string]string{
+					"detail": "not found",
+					"path":   r.URL.Path,
 				}, logger)
 				return
 			}
@@ -282,14 +300,24 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 	}
 }
 
+// fixedStates is the stable three-state set the stub serves on
+// GET /states/. The UUIDs are pinned so e2e assertions can check that
+// the bridge PATCHed a work item to a specific state.
+var fixedStates = []map[string]any{
+	{"id": "11111111-0000-0000-0000-000000000001", "name": "Backlog", "group": "backlog", "color": "#888888"},
+	{"id": "11111111-0000-0000-0000-000000000002", "name": "In Progress", "group": "started", "color": "#0066ff"},
+	{"id": "11111111-0000-0000-0000-000000000003", "name": "Done", "group": "completed", "color": "#00aa00"},
+}
+
 // workItemStore is the stub's tiny in-memory state. It tracks work items
 // indexed by (external_source, external_id) — populated on POST,
 // queried by GetIssueByExternalRef — and labels per project — populated
 // by POST /labels, queried by ListProjectLabels. Concurrency-safe.
 type workItemStore struct {
-	mu     sync.Mutex
-	items  map[string]map[string]any
-	labels map[string][]map[string]any // projectID → labels
+	mu       sync.Mutex
+	items    map[string]map[string]any
+	lastItem map[string]any              // most-recently-POSTed, for /work-items/X-N lookup
+	labels   map[string][]map[string]any // projectID → labels
 }
 
 func newWorkItemStore() *workItemStore {
@@ -309,6 +337,24 @@ func (s *workItemStore) put(src, ext string, item map[string]any) {
 		cp[k] = v
 	}
 	s.items[s.key(src, ext)] = cp
+	s.lastItem = cp
+}
+
+// last returns the most-recently-stored work item (any project). Used by
+// the workspace-level /work-items/{ident}-{seq}/ lookup, which is keyed
+// on a (project_identifier, sequence_id) pair that the stub doesn't
+// track; returning the most recent is enough for the single-issue e2e.
+func (s *workItemStore) last() (map[string]any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastItem == nil {
+		return nil, false
+	}
+	cp := make(map[string]any, len(s.lastItem))
+	for k, v := range s.lastItem {
+		cp[k] = v
+	}
+	return cp, true
 }
 
 func (s *workItemStore) get(src, ext string) (map[string]any, bool) {
@@ -355,6 +401,7 @@ func (s *workItemStore) reset() {
 	defer s.mu.Unlock()
 	s.items = make(map[string]map[string]any)
 	s.labels = make(map[string][]map[string]any)
+	s.lastItem = nil
 }
 
 // isKnownAPIPath returns true if path matches one of the Plane endpoints
@@ -371,13 +418,21 @@ func isKnownAPIPath(path string) bool {
 	// /api/v1/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}  (PATCH)
 	// /api/v1/workspaces/{slug}/projects/{pid}/labels             (GET, POST)
 	// /api/v1/workspaces/{slug}/projects/{pid}/states             (GET)
+	// /api/v1/workspaces/{slug}/work-items/{ident}-{seq}          (GET) — workspace-level lookup
 	//
 	// After splitting on "/", a leading "" appears at index 0:
-	// ["", "api", "v1", "workspaces", "{slug}", "projects", "{pid}", "issues"|"labels"|"states", ...]
-	if len(parts) < 8 {
+	// ["", "api", "v1", "workspaces", "{slug}", "projects"|"work-items", ...]
+	if len(parts) < 6 {
 		return false
 	}
-	if parts[1] != "api" || parts[2] != "v1" || parts[3] != "workspaces" || parts[5] != "projects" {
+	if parts[1] != "api" || parts[2] != "v1" || parts[3] != "workspaces" {
+		return false
+	}
+	if parts[5] == "work-items" {
+		// .../work-items/{ident-seq}
+		return len(parts) == 7
+	}
+	if parts[5] != "projects" || len(parts) < 8 {
 		return false
 	}
 	switch parts[7] {
@@ -393,6 +448,14 @@ func isKnownAPIPath(path string) bool {
 		return len(parts) == 8 || len(parts) == 9
 	}
 	return false
+}
+
+// isWorkItemLookup reports whether path is the workspace-level
+// /work-items/{ident}-{seq} lookup endpoint.
+func isWorkItemLookup(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	parts := strings.Split(p, "/")
+	return len(parts) == 7 && parts[5] == "work-items"
 }
 
 // isLabelsCollection reports whether path is the collection endpoint

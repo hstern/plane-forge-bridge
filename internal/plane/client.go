@@ -136,12 +136,13 @@ func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, e
 // external_id+external_source (see GetIssueByExternalRef). The single
 // available lookup-by-sequence path is the workspace-level work item
 // endpoint, which is keyed by the project's *short identifier code* (the
-// "PFB" in "PFB-123") rather than the project UUID. For that reason
-// projectID here is the project identifier code, not the UUID accepted by
-// the other Client methods. Plane returns the bare serialized object on a
-// hit (HTTP 200) or 404 on a miss — same shape as GetIssueByExternalRef.
-func (c *Client) GetIssueBySequenceID(ctx context.Context, projectID string, sequenceID int) (*WorkItem, error) {
-	path := fmt.Sprintf("/workspaces/%s/work-items/%s-%d/", c.WorkspaceSlug, projectID, sequenceID)
+// "PFB" in "PFB-123") rather than the project UUID. The first argument
+// is therefore the project's identifier code, NOT the project UUID
+// accepted by the other Client methods. Plane returns the bare
+// serialized object on a hit (HTTP 200) or 404 on a miss — same shape
+// as GetIssueByExternalRef.
+func (c *Client) GetIssueBySequenceID(ctx context.Context, projectIdentifier string, sequenceID int) (*WorkItem, error) {
+	path := fmt.Sprintf("/workspaces/%s/work-items/%s-%d/", c.WorkspaceSlug, projectIdentifier, sequenceID)
 	var out WorkItem
 	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
 		var apiErr *APIError

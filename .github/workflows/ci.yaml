@@ -232,7 +232,12 @@ jobs:
           links:
             - forge_repo: ${FORGE_ORG}/${FORGE_REPO}
               plane_project_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+              project_identifier: PFB
               state_map: {}
+              pr_state_map:
+                opened: "In Progress"
+                merged: "Done"
+                closed: "Cancelled"
           users: {}
           YAML
 
@@ -410,6 +415,72 @@ jobs:
           set -euo pipefail
           chmod +x test/e2e-docker/assert.sh
           bash test/e2e-docker/assert.sh
+
+      - name: Create a branch with a file change for the PR
+        run: |
+          set -euo pipefail
+          # Get the main branch SHA so we can branch from it.
+          main_sha=$(curl -fsS -H "Authorization: token $FORGE_TOKEN" \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/branches/main" | jq -r .commit.id)
+          echo "main_sha=$main_sha"
+          # Create the branch (Gitea/Forgejo branch-create API).
+          curl -fsS -o /dev/null \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d "{\"new_branch_name\":\"e2e-pr\",\"old_branch_name\":\"main\"}" \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/branches"
+          # Create a file on the new branch so the branch has a commit ahead of main.
+          curl -fsS -o /dev/null \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d "{\"branch\":\"e2e-pr\",\"content\":\"$(printf 'e2e change' | base64)\",\"message\":\"e2e: file for PR\"}" \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/contents/pr.txt"
+
+      - name: Open a PR with a [PFB-1] ref
+        id: pr
+        run: |
+          set -euo pipefail
+          http_code=$(curl -sS -o /tmp/pr.json -w '%{http_code}' \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d "{\"title\":\"[PFB-1] e2e PR\",\"body\":\"closes [PFB-1]\",\"head\":\"e2e-pr\",\"base\":\"main\"}" \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/pulls")
+          echo "POST /pulls status=$http_code"
+          cat /tmp/pr.json | head -c 2000; echo
+          [ "$http_code" = "201" ] || { echo "ERROR: pr create returned $http_code"; exit 1; }
+          echo "number=$(jq -r .number /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Assert plane-stub recorded a state PATCH for the PR open
+        env:
+          PLANE_STUB_URL: http://localhost:8081
+          # PFB In Progress UUID from plane-stub's fixedStates list.
+          EXPECTED_STATE_UUID: 11111111-0000-0000-0000-000000000002
+          PR_WAIT_SEC: 60
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 "$PR_WAIT_SEC"); do
+            match=$(curl -fsS "$PLANE_STUB_URL/_/recorded" |
+              jq -c --arg s "$EXPECTED_STATE_UUID" '
+                .[] |
+                select(.method == "PATCH") |
+                select(.path | test("/api/v1/workspaces/[^/]+/projects/[^/]+/issues/[^/]+/?$")) |
+                (.body | try fromjson) as $b |
+                select($b.state == $s) |
+                {path: .path, state: $b.state}
+              ' | head -n1)
+            if [ -n "$match" ]; then
+              echo "matched PR state PATCH after ${i}s:"
+              printf '%s\n' "$match" | jq .
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: no PATCH to In Progress state recorded within ${PR_WAIT_SEC}s"
+          curl -fsS "$PLANE_STUB_URL/_/recorded" | jq '[.[] | select(.method=="PATCH")]'
+          exit 1
 
       - name: Capture diagnostics on failure
         if: failure()

@@ -320,7 +320,10 @@ The build order from the scaffolding brief:
    on plane, apply state_map on create/reconcile/close/reopen). Forge
    label helpers landed too; consumed when step 10's plane→forge issue
    path lands.*
-9. PR / branch → work-item state automation.
+9. PR / branch → work-item state automation. ← *done for opened /
+   reopened / merged / closed. pull_request_review handling deferred
+   to a later step (needs review-state semantics — approved vs
+   changes-requested).*
 10. Plane → forge direction.
 11. v2: Plane→workspace-members API for identity (no custom OAuth needed —
     Plane already supports Gitea/Forgejo as an authn provider, so the

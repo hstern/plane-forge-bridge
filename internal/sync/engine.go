@@ -36,7 +36,7 @@ import (
 type PlaneClient interface {
 	GetIssue(ctx context.Context, projectID, issueID string) (*plane.WorkItem, error)
 	GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*plane.WorkItem, error)
-	GetIssueBySequenceID(ctx context.Context, projectID string, sequenceID int) (*plane.WorkItem, error)
+	GetIssueBySequenceID(ctx context.Context, projectIdentifier string, sequenceID int) (*plane.WorkItem, error)
 	CreateIssue(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssue(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStates(ctx context.Context, projectID string) ([]plane.State, error)
@@ -803,7 +803,9 @@ func (e *Engine) HandleForgePullRequest(ctx context.Context, evt *forge.Event) (
 		}, nil
 	}
 
-	wi, err := e.Client.GetIssueBySequenceID(ctx, link.PlaneProjectID, seq)
+	// The plane endpoint takes the project's short identifier code (e.g.
+	// "PFB"), not the project UUID. See plane.Client.GetIssueBySequenceID.
+	wi, err := e.Client.GetIssueBySequenceID(ctx, link.ProjectIdentifier, seq)
 	if errors.Is(err, plane.ErrNotFound) {
 		return &Outcome{
 			Action: ActionSkipped,
