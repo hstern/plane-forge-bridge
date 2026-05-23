@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hstern/plane-forge-bridge/internal/forge"
 	"github.com/hstern/plane-forge-bridge/internal/idemp"
 	"github.com/hstern/plane-forge-bridge/internal/mapping"
 	"github.com/hstern/plane-forge-bridge/internal/plane"
@@ -183,7 +184,7 @@ func (e *Engine) handlePlaneWorkItemCreated(ctx context.Context, evt *plane.Even
 		return nil, fmt.Errorf("sync: resolve forge labels: %w", err)
 	}
 
-	req := ForgeCreateIssueRequest{
+	req := forge.CreateIssueRequest{
 		Title: evt.WorkItem.Name,
 		Body:  body,
 	}

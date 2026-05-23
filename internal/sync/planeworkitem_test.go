@@ -222,7 +222,7 @@ func TestHandlePlaneWorkItem_PropagatesForgeError(t *testing.T) {
 		Path:       "/api/v1/repos/acme/widgets/issues",
 		Body:       `{"message":"already exists"}`,
 	}
-	fc.CreateIssueFunc = func(_ context.Context, _, _ string, _ ForgeCreateIssueRequest) (*forge.Issue, error) {
+	fc.CreateIssueFunc = func(_ context.Context, _, _ string, _ forge.CreateIssueRequest) (*forge.Issue, error) {
 		return nil, apiErr
 	}
 

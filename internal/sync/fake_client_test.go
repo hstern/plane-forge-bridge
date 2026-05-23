@@ -275,8 +275,8 @@ type fakeForgeClient struct {
 	mu sync.Mutex
 
 	GetIssueFunc        func(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
-	CreateIssueFunc     func(ctx context.Context, owner, repo string, req ForgeCreateIssueRequest) (*forge.Issue, error)
-	UpdateIssueFunc     func(ctx context.Context, owner, repo string, number int64, req ForgeUpdateIssueRequest) (*forge.Issue, error)
+	CreateIssueFunc     func(ctx context.Context, owner, repo string, req forge.CreateIssueRequest) (*forge.Issue, error)
+	UpdateIssueFunc     func(ctx context.Context, owner, repo string, number int64, req forge.UpdateIssueRequest) (*forge.Issue, error)
 	ListRepoLabelsFunc  func(ctx context.Context, owner, repo string) ([]forge.Label, error)
 	CreateRepoLabelFunc func(ctx context.Context, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error)
 	CreateCommentFunc   func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
@@ -296,14 +296,14 @@ type fakeForgeClient struct {
 type forgeIssueCreateCall struct {
 	Owner string
 	Repo  string
-	Req   ForgeCreateIssueRequest
+	Req   forge.CreateIssueRequest
 }
 
 type forgeIssueUpdateCall struct {
 	Owner  string
 	Repo   string
 	Number int64
-	Req    ForgeUpdateIssueRequest
+	Req    forge.UpdateIssueRequest
 }
 
 type forgeLabelListCall struct {
@@ -354,7 +354,7 @@ func (f *fakeForgeClient) GetIssue(ctx context.Context, owner, repo string, numb
 	return nil, forge.ErrUnsupportedEvent
 }
 
-func (f *fakeForgeClient) CreateIssue(ctx context.Context, owner, repo string, req ForgeCreateIssueRequest) (*forge.Issue, error) {
+func (f *fakeForgeClient) CreateIssue(ctx context.Context, owner, repo string, req forge.CreateIssueRequest) (*forge.Issue, error) {
 	f.mu.Lock()
 	f.IssueCreates = append(f.IssueCreates, forgeIssueCreateCall{Owner: owner, Repo: repo, Req: req})
 	fn := f.CreateIssueFunc
@@ -374,7 +374,7 @@ func (f *fakeForgeClient) CreateIssue(ctx context.Context, owner, repo string, r
 	}, nil
 }
 
-func (f *fakeForgeClient) UpdateIssue(ctx context.Context, owner, repo string, number int64, req ForgeUpdateIssueRequest) (*forge.Issue, error) {
+func (f *fakeForgeClient) UpdateIssue(ctx context.Context, owner, repo string, number int64, req forge.UpdateIssueRequest) (*forge.Issue, error) {
 	f.mu.Lock()
 	f.IssueUpdates = append(f.IssueUpdates, forgeIssueUpdateCall{Owner: owner, Repo: repo, Number: number, Req: req})
 	fn := f.UpdateIssueFunc

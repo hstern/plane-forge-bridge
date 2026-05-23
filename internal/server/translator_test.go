@@ -28,6 +28,7 @@ type fakeTranslator struct {
 	respondForgeIssue       func(evt *forge.Event) (*pfbsync.Outcome, error)
 	respondForgeComment     func(evt *forge.Event) (*pfbsync.Outcome, error)
 	respondForgePullRequest func(evt *forge.Event) (*pfbsync.Outcome, error)
+	respondPlaneWorkItem    func(evt *plane.Event) (*pfbsync.Outcome, error)
 	respondPlaneComment     func(evt *plane.Event) (*pfbsync.Outcome, error)
 }
 
@@ -59,6 +60,16 @@ func (f *fakeTranslator) HandleForgePullRequest(_ context.Context, evt *forge.Ev
 		return f.respondForgePullRequest(evt)
 	}
 	return &pfbsync.Outcome{Action: pfbsync.ActionUpdated, WorkItemID: "wi-pr-default"}, nil
+}
+
+func (f *fakeTranslator) HandlePlaneWorkItem(_ context.Context, evt *plane.Event) (*pfbsync.Outcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.plane = append(f.plane, evt)
+	if f.respondPlaneWorkItem != nil {
+		return f.respondPlaneWorkItem(evt)
+	}
+	return &pfbsync.Outcome{Action: pfbsync.ActionCreated, WorkItemID: "forge-issue-default"}, nil
 }
 
 func (f *fakeTranslator) HandlePlaneComment(_ context.Context, evt *plane.Event) (*pfbsync.Outcome, error) {
@@ -337,6 +348,54 @@ func TestForgeWebhook_PullRequestTranslateError_500(t *testing.T) {
 	req.Header.Set(forge.HeaderSignature, sig)
 	req.Header.Set(forge.HeaderEvent, "pull_request")
 	req.Header.Set(forge.HeaderDelivery, "delivery-pr-boom")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestPlaneWebhook_DispatchesWorkItemToTranslator(t *testing.T) {
+	ft := &fakeTranslator{
+		respondPlaneWorkItem: func(_ *plane.Event) (*pfbsync.Outcome, error) {
+			return &pfbsync.Outcome{Action: pfbsync.ActionCreated, WorkItemID: "fi-42"}, nil
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../plane/testdata/work_item_created.json")
+	sig := sign(testPlaneSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/plane/webhook", bytes.NewReader(body))
+	req.Header.Set(plane.HeaderSignature, sig)
+	req.Header.Set(plane.HeaderEvent, "issue")
+	req.Header.Set(plane.HeaderDelivery, "plane-wi-1")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d want %d (body=%s)", rr.Code, http.StatusAccepted, rr.Body.String())
+	}
+	if ft.planeCallCount() != 1 {
+		t.Fatalf("plane work_item translator calls: got %d want 1", ft.planeCallCount())
+	}
+	if !s.dedupe.Seen(idemp.SourcePlane, "plane-wi-1", "fi-42") {
+		t.Error("LRU should have recorded (plane, plane-wi-1, fi-42) on work_item create")
+	}
+}
+
+func TestPlaneWebhook_WorkItemTranslateError_500(t *testing.T) {
+	ft := &fakeTranslator{
+		respondPlaneWorkItem: func(_ *plane.Event) (*pfbsync.Outcome, error) {
+			return nil, errors.New("plane work_item translator boom")
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../plane/testdata/work_item_created.json")
+	sig := sign(testPlaneSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/plane/webhook", bytes.NewReader(body))
+	req.Header.Set(plane.HeaderSignature, sig)
+	req.Header.Set(plane.HeaderEvent, "issue")
+	req.Header.Set(plane.HeaderDelivery, "plane-wi-boom")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {

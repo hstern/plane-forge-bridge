@@ -324,7 +324,11 @@ The build order from the scaffolding brief:
    reopened / merged / closed. pull_request_review handling deferred
    to a later step (needs review-state semantics — approved vs
    changes-requested).*
-10. Plane → forge direction.
+10. Plane → forge direction. ← *done for work_item.created (forge
+    issue created with loop-break + plane-ref markers, forge labels
+    auto-created). work_item.updated and work_item.deleted are
+    skipped pending a forge.Client.SearchIssues to reverse-resolve
+    the plane-ref marker; tracked as an open question.*
 11. v2: Plane→workspace-members API for identity (no custom OAuth needed —
     Plane already supports Gitea/Forgejo as an authn provider, so the
     forge identity is already in Plane's member metadata for users who

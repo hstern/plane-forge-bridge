@@ -28,6 +28,7 @@ type Translator interface {
 	HandleForgeIssue(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
 	HandleForgeComment(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
 	HandleForgePullRequest(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
+	HandlePlaneWorkItem(ctx context.Context, evt *plane.Event) (*pfbsync.Outcome, error)
 	HandlePlaneComment(ctx context.Context, evt *plane.Event) (*pfbsync.Outcome, error)
 }
 
@@ -269,11 +270,48 @@ func (s *Server) handlePlane(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if s.translator != nil && isPlaneCommentEvent(evt.Kind) {
-		s.dispatchPlaneComment(w, r, evt)
-		return
+	if s.translator != nil {
+		switch {
+		case isPlaneWorkItemEvent(evt.Kind):
+			s.dispatchPlaneWorkItem(w, r, evt)
+			return
+		case isPlaneCommentEvent(evt.Kind):
+			s.dispatchPlaneComment(w, r, evt)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) dispatchPlaneWorkItem(w http.ResponseWriter, r *http.Request, evt *plane.Event) {
+	outcome, terr := s.translator.HandlePlaneWorkItem(r.Context(), evt)
+	if terr != nil {
+		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (plane work_item)",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("err", terr.Error()),
+		)
+		http.Error(w, "translator error", http.StatusInternalServerError)
+		return
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "plane work_item translated",
+		slog.String("delivery_id", evt.DeliveryID),
+		slog.String("action", actionString(outcome.Action)),
+		slog.String("work_item_id", outcome.WorkItemID),
+		slog.String("reason", outcome.Reason),
+	)
+	if outcome.WorkItemID != "" {
+		s.dedupe.Record(idemp.SourcePlane, evt.DeliveryID, outcome.WorkItemID)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func isPlaneWorkItemEvent(k plane.EventKind) bool {
+	switch k {
+	case plane.EventWorkItemCreated, plane.EventWorkItemUpdated, plane.EventWorkItemDeleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) dispatchPlaneComment(w http.ResponseWriter, r *http.Request, evt *plane.Event) {
