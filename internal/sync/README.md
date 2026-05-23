@@ -1,7 +1,8 @@
 # internal/sync
 
 Bidirectional translation between parsed forge webhook events and Plane
-REST API calls. Covers issues (step 6) and comments (step 7) in the
+REST API calls. Covers issues (step 6), comments (step 7), and labels +
+state-map coverage on issue writes (step 8) in the
 [build order](../../AGENTS.md#build-order).
 
 ## What it does
@@ -31,6 +32,8 @@ type PlaneClient interface {
     CreateIssue(ctx, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
     UpdateIssue(ctx, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
     ListProjectStates(ctx, projectID string) ([]plane.State, error)
+    ListProjectLabels(ctx, projectID string) ([]plane.Label, error)
+    CreateProjectLabel(ctx, projectID string, req plane.CreateLabelRequest) (*plane.Label, error)
     CreateComment(ctx, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
     UpdateComment(ctx, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
     DeleteComment(ctx, projectID, issueID, commentID string) error
@@ -38,6 +41,8 @@ type PlaneClient interface {
 
 type ForgeClient interface {
     GetIssue(ctx, owner, repo string, number int64) (*forge.Issue, error)
+    ListRepoLabels(ctx, owner, repo string) ([]forge.Label, error)
+    CreateRepoLabel(ctx, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error)
     CreateComment(ctx, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
     UpdateComment(ctx, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
     DeleteComment(ctx, owner, repo string, commentID int64) error
@@ -99,13 +104,26 @@ func RenderComment(originalBody, senderLogin, senderHTMLURL, repoFullName, deliv
 Branches on `evt.Kind` after first checking that `evt.Repo.FullName` is in
 the configured link list:
 
-| evt.Kind              | If found on Plane           | If not found on Plane               |
-|-----------------------|-----------------------------|-------------------------------------|
-| `IssueOpened`         | `UpdateIssue` (reconcile)   | `CreateIssue`                       |
-| `IssueEdited`         | `UpdateIssue` (title+body)  | log warn, `ActionSkipped`           |
-| `IssueClosed`         | `UpdateIssue` (state=closed)| `ActionSkipped`                     |
-| `IssueReopened`       | `UpdateIssue` (state=open)  | `ActionSkipped`                     |
-| anything else         | n/a                         | `ActionSkipped` ("unsupported")     |
+| evt.Kind              | If found on Plane                       | If not found on Plane               |
+|-----------------------|-----------------------------------------|-------------------------------------|
+| `IssueOpened`         | `UpdateIssue` (reconcile: title+body+labels+open state) | `CreateIssue` (title+body+labels+open state) |
+| `IssueEdited`         | `UpdateIssue` (title+body+labels; state untouched)      | log warn, `ActionSkipped`           |
+| `IssueClosed`         | `UpdateIssue` (state=closed; labels untouched)          | `ActionSkipped`                     |
+| `IssueReopened`       | `UpdateIssue` (state=open; labels untouched)            | `ActionSkipped`                     |
+| anything else         | n/a                                     | `ActionSkipped` ("unsupported")     |
+
+Why `IssueEdited` does NOT touch state: forge fires `issues.edited` for any
+property change — title, body, assignee, labels — and the payload doesn't
+reliably signal whether the state changed. The explicit transitions arrive
+as `IssueClosed` / `IssueReopened` where we DO translate via
+`link.StateMap`. Touching state on edit risks moving Plane backwards when a
+user edits the title of a closed forge issue.
+
+Why `IssueClosed` / `IssueReopened` do NOT touch labels: those events are
+pure state transitions. The latest labels arrive via the next
+`IssueOpened` (on reconcile redelivery) or `IssueEdited`. Reading label
+state on every close/reopen would add a wasted resolver pass on the hot
+path.
 
 ### forge → plane comments (`HandleForgeComment`)
 
@@ -216,6 +234,34 @@ The state cache is concurrency-safe. Concurrent cold-fill calls for the
 same project coalesce on a per-project mutex, so the engine doesn't fan
 out N parallel `ListProjectStates` requests under bursty webhook load.
 
+## Label translation
+
+`labelResolver` (in `labels.go`) maps forge label *names* onto Plane label
+*UUIDs* scoped to a single Plane project. The resolver is wired into the
+issue create, reconcile, and edit paths so any labels carried on the forge
+event land on the Plane work item.
+
+```
+forge labels → resolveLabels(projectID, names) → []plane-label-UUID
+```
+
+Resolution:
+
+1. First call for a project (or after the 5-minute TTL expires) →
+   `ListProjectLabels`, build a `name → UUID` map.
+2. Subsequent calls → serve from the cache.
+3. Name miss → `CreateProjectLabel`, fold the resulting UUID into the cache
+   so the next lookup hits.
+
+Like the state cache, refresh and create attempts serialise on a
+per-project mutex so N concurrent webhooks for the same project trigger at
+most one `ListProjectLabels`. The thundering-herd guard is covered by
+`TestResolveLabels_ConcurrentSameProject_OneList`.
+
+Empty input → empty output, zero API calls. Errors from `ListProjectLabels`
+or `CreateProjectLabel` propagate; the engine fails the event rather than
+silently dropping labels.
+
 ## Idempotency
 
 Two redeliveries of the same forge open event produce the same Plane work
@@ -271,17 +317,36 @@ Sketch of follow-ups, ordered by cost:
 (1) is the most likely choice and is tracked outside this package, in
 the build-order roadmap.
 
+### Label cache invalidation
+
+The label resolver does not invalidate on rename. If an operator renames a
+label in Plane while the cache is warm, the engine keeps returning the
+cached UUID for the OLD name and will auto-create a duplicate under the
+NEW name for any forge event that arrives before the 5-minute TTL elapses.
+
+The blast radius is a name collision in the Plane project, not data loss,
+and operators can wait out the TTL. Options if we need to do better:
+
+1. Cache-bust on `CreateProjectLabel` failure when Plane returns a
+   uniqueness conflict (today we propagate the error).
+2. Subscribe to Plane label.* webhooks once they exist and invalidate
+   reactively.
+3. Shorten the TTL. The cost is more `ListProjectLabels` traffic; the
+   five-minute value is conservative and matches `stateCacheTTL`.
+
 ## Not yet implemented
 
-This package covers issues (step 6) and the forward/backward comment
-paths (step 7). Remaining gaps live in later steps:
+This package covers issues (step 6), the forward/backward comment paths
+(step 7), and label translation + complete state-map coverage on issue
+writes (step 8). Remaining gaps live in later steps:
 
-- **Labels** (step 8) — currently the engine ignores `Issue.Labels`.
 - **PR / branch → work-item state automation** (step 9) — pull request
   events are short-circuited as `ActionSkipped` for now.
 - **Plane → forge issue translation** (step 10) — a separate handler that
-  the server will dispatch from `/plane/webhook`. This package's step-7
-  `HandlePlaneComment` is the prototype for how that dispatch will work.
+  the server will dispatch from `/plane/webhook`. The forge-side label
+  helpers (`ListRepoLabels` / `CreateRepoLabel`) are wired into the
+  `ForgeClient` interface and fake in this step so step 10 can consume
+  them without touching the contract.
 - **Comment update/delete in both directions** — see "Open questions".
 
 ## Dependencies

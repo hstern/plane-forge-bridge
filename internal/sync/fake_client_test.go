@@ -30,18 +30,27 @@ type fakeClient struct {
 	CreateIssueFunc           func(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssueFunc           func(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStatesFunc     func(ctx context.Context, projectID string) ([]plane.State, error)
+	ListProjectLabelsFunc     func(ctx context.Context, projectID string) ([]plane.Label, error)
+	CreateProjectLabelFunc    func(ctx context.Context, projectID string, req plane.CreateLabelRequest) (*plane.Label, error)
 	CreateCommentFunc         func(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
 	UpdateCommentFunc         func(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteCommentFunc         func(ctx context.Context, projectID, issueID, commentID string) error
 
-	Gets           []getCall
-	GetsByID       []getByIDCall
-	Creates        []createCall
-	Updates        []updateCall
-	Lists          []string
-	CommentCreates []commentCreateCall
-	CommentUpdates []commentUpdateCall
-	CommentDeletes []commentDeleteCall
+	Gets                     []getCall
+	GetsByID                 []getByIDCall
+	Creates                  []createCall
+	Updates                  []updateCall
+	Lists                    []string
+	ListProjectLabelsCalls   []string
+	CreateProjectLabelCalls  []labelCreateCall
+	CommentCreates           []commentCreateCall
+	CommentUpdates           []commentUpdateCall
+	CommentDeletes           []commentDeleteCall
+}
+
+type labelCreateCall struct {
+	ProjectID string
+	Req       plane.CreateLabelRequest
 }
 
 type getByIDCall struct {
@@ -156,6 +165,28 @@ func (f *fakeClient) ListProjectStates(ctx context.Context, projectID string) ([
 	}, nil
 }
 
+func (f *fakeClient) ListProjectLabels(ctx context.Context, projectID string) ([]plane.Label, error) {
+	f.mu.Lock()
+	f.ListProjectLabelsCalls = append(f.ListProjectLabelsCalls, projectID)
+	fn := f.ListProjectLabelsFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID)
+	}
+	return nil, nil
+}
+
+func (f *fakeClient) CreateProjectLabel(ctx context.Context, projectID string, req plane.CreateLabelRequest) (*plane.Label, error) {
+	f.mu.Lock()
+	f.CreateProjectLabelCalls = append(f.CreateProjectLabelCalls, labelCreateCall{ProjectID: projectID, Req: req})
+	fn := f.CreateProjectLabelFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, req)
+	}
+	return &plane.Label{ID: "label-" + req.Name, Name: req.Name}, nil
+}
+
 func (f *fakeClient) CreateComment(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error) {
 	f.mu.Lock()
 	f.CommentCreates = append(f.CommentCreates, commentCreateCall{ProjectID: projectID, IssueID: issueID, Req: req})
@@ -225,15 +256,30 @@ func (f *fakeClient) snapshot() (gets []getCall, creates []createCall, updates [
 type fakeForgeClient struct {
 	mu sync.Mutex
 
-	GetIssueFunc      func(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
-	CreateCommentFunc func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
-	UpdateCommentFunc func(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
-	DeleteCommentFunc func(ctx context.Context, owner, repo string, commentID int64) error
+	GetIssueFunc        func(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
+	ListRepoLabelsFunc  func(ctx context.Context, owner, repo string) ([]forge.Label, error)
+	CreateRepoLabelFunc func(ctx context.Context, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error)
+	CreateCommentFunc   func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
+	UpdateCommentFunc   func(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
+	DeleteCommentFunc   func(ctx context.Context, owner, repo string, commentID int64) error
 
-	IssueGets      []forgeGetIssueCall
-	CommentCreates []forgeCommentCreateCall
-	CommentUpdates []forgeCommentUpdateCall
-	CommentDeletes []forgeCommentDeleteCall
+	IssueGets         []forgeGetIssueCall
+	LabelLists        []forgeLabelListCall
+	LabelCreates      []forgeLabelCreateCall
+	CommentCreates    []forgeCommentCreateCall
+	CommentUpdates    []forgeCommentUpdateCall
+	CommentDeletes    []forgeCommentDeleteCall
+}
+
+type forgeLabelListCall struct {
+	Owner string
+	Repo  string
+}
+
+type forgeLabelCreateCall struct {
+	Owner string
+	Repo  string
+	Req   forge.CreateLabelRequest
 }
 
 type forgeGetIssueCall struct {
@@ -271,6 +317,28 @@ func (f *fakeForgeClient) GetIssue(ctx context.Context, owner, repo string, numb
 		return fn(ctx, owner, repo, number)
 	}
 	return nil, forge.ErrUnsupportedEvent
+}
+
+func (f *fakeForgeClient) ListRepoLabels(ctx context.Context, owner, repo string) ([]forge.Label, error) {
+	f.mu.Lock()
+	f.LabelLists = append(f.LabelLists, forgeLabelListCall{Owner: owner, Repo: repo})
+	fn := f.ListRepoLabelsFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo)
+	}
+	return nil, nil
+}
+
+func (f *fakeForgeClient) CreateRepoLabel(ctx context.Context, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error) {
+	f.mu.Lock()
+	f.LabelCreates = append(f.LabelCreates, forgeLabelCreateCall{Owner: owner, Repo: repo, Req: req})
+	fn := f.CreateRepoLabelFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, req)
+	}
+	return &forge.Label{ID: 1, Name: req.Name}, nil
 }
 
 func (f *fakeForgeClient) CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error) {
