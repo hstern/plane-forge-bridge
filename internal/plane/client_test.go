@@ -388,6 +388,257 @@ func TestClient_UserAgentOverride(t *testing.T) {
 	}
 }
 
+func TestGetIssue_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(WorkItem{
+			ID:   "issue-uuid",
+			Name: "Mirrored",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.GetIssue(context.Background(), "proj-1", "issue-uuid")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if want := "/workspaces/acme/projects/proj-1/issues/issue-uuid/"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if got.ID != "issue-uuid" || got.Name != "Mirrored" {
+		t.Errorf("WorkItem = %+v, want {ID:issue-uuid Name:Mirrored}", got)
+	}
+}
+
+func TestGetIssue_NotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"detail":"Not found."}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.GetIssue(context.Background(), "proj-1", "no-such")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	// As with GetIssueByExternalRef, callers must not need to dig into
+	// *APIError for the 404 → not-found case.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("404 surfaced as *APIError (%v); want sentinel ErrNotFound only", apiErr)
+	}
+}
+
+func TestCreateComment_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   CreateCommentRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode req body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(CommentResponse{
+			ID:          "comment-uuid",
+			IssueID:     "issue-uuid",
+			Project:     "proj-1",
+			CommentHTML: gotBody.CommentHTML,
+			Access:      "EXTERNAL",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.CreateComment(context.Background(), "proj-1", "issue-uuid", CreateCommentRequest{
+		CommentHTML: "<p>hi</p>",
+	})
+	if err != nil {
+		t.Fatalf("CreateComment: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if want := "/workspaces/acme/projects/proj-1/issues/issue-uuid/comments/"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotBody.CommentHTML != "<p>hi</p>" {
+		t.Errorf("posted body = %+v, want CommentHTML=<p>hi</p>", gotBody)
+	}
+	if got.ID != "comment-uuid" || got.CommentHTML != "<p>hi</p>" {
+		t.Errorf("CommentResponse = %+v, want {ID:comment-uuid CommentHTML:<p>hi</p>}", got)
+	}
+}
+
+func TestCreateComment_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":"Invalid HTML passed"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.CreateComment(context.Background(), "proj-1", "issue-uuid", CreateCommentRequest{
+		CommentHTML: "<not-html",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want 422", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "Invalid HTML passed") {
+		t.Errorf("Body = %q, want upstream message", apiErr.Body)
+	}
+}
+
+func TestUpdateComment_OnlyChangedFields(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		raw       map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CommentResponse{ID: "comment-uuid"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	html := "<p>edited</p>"
+	got, err := c.UpdateComment(context.Background(), "proj-1", "issue-uuid", "comment-uuid", UpdateCommentRequest{
+		CommentHTML: &html,
+	})
+	if err != nil {
+		t.Fatalf("UpdateComment: %v", err)
+	}
+	if gotMethod != http.MethodPatch {
+		t.Errorf("method = %q, want PATCH", gotMethod)
+	}
+	if want := "/workspaces/acme/projects/proj-1/issues/issue-uuid/comments/comment-uuid/"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if len(raw) != 1 {
+		t.Errorf("body keys = %v, want exactly 1 (comment_html)", keys(raw))
+	}
+	if v, ok := raw["comment_html"]; !ok || v != "<p>edited</p>" {
+		t.Errorf("comment_html = %v (present=%v), want <p>edited</p>", v, ok)
+	}
+	if got.ID != "comment-uuid" {
+		t.Errorf("returned ID = %q, want comment-uuid", got.ID)
+	}
+}
+
+func TestDeleteComment_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("204_no_content", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod, gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			assertCommonHeaders(t, r)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(srv.Close)
+
+		c := newTestClient(t, srv)
+		if err := c.DeleteComment(context.Background(), "proj-1", "issue-uuid", "comment-uuid"); err != nil {
+			t.Fatalf("DeleteComment: %v", err)
+		}
+		if gotMethod != http.MethodDelete {
+			t.Errorf("method = %q, want DELETE", gotMethod)
+		}
+		if want := "/workspaces/acme/projects/proj-1/issues/issue-uuid/comments/comment-uuid/"; gotPath != want {
+			t.Errorf("path = %q, want %q", gotPath, want)
+		}
+	})
+
+	t.Run("404_returns_ErrNotFound", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"detail":"Not found."}`)
+		}))
+		t.Cleanup(srv.Close)
+
+		c := newTestClient(t, srv)
+		err := c.DeleteComment(context.Background(), "proj-1", "issue-uuid", "gone")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			t.Errorf("404 surfaced as *APIError (%v); want sentinel ErrNotFound only", apiErr)
+		}
+	})
+}
+
+func TestDeleteComment_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	err := c.DeleteComment(context.Background(), "proj-1", "issue-uuid", "comment-uuid")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+}
+
 // keys returns the sorted keys of m for use in error messages.
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))

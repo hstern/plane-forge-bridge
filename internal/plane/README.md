@@ -97,8 +97,12 @@ func NewClient(baseURL, workspaceSlug, apiKey string, hc *http.Client) *Client
 
 func (c *Client) CreateIssue(ctx context.Context, projectID string, req CreateIssueRequest) (*WorkItem, error)
 func (c *Client) UpdateIssue(ctx context.Context, projectID, issueID string, req UpdateIssueRequest) (*WorkItem, error)
+func (c *Client) GetIssue(ctx context.Context, projectID, issueID string) (*WorkItem, error)
 func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*WorkItem, error)
 func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]State, error)
+func (c *Client) CreateComment(ctx context.Context, projectID, issueID string, req CreateCommentRequest) (*CommentResponse, error)
+func (c *Client) UpdateComment(ctx context.Context, projectID, issueID, commentID string, req UpdateCommentRequest) (*CommentResponse, error)
+func (c *Client) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
 ```
 
 Sentinel errors:
@@ -128,8 +132,29 @@ response body preserved for diagnosis.
 | ------------------------ | ------ | ----------------------------------------------------------------------------- | ---------------------- |
 | `CreateIssue`            | POST   | `/workspaces/{slug}/projects/{pid}/issues/`                                   | `*WorkItem`            |
 | `UpdateIssue`            | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem`            |
+| `GetIssue`               | GET    | `/workspaces/{slug}/projects/{pid}/issues/{iid}/`                             | `*WorkItem` / `ErrNotFound` |
 | `GetIssueByExternalRef`  | GET    | `/workspaces/{slug}/projects/{pid}/issues/?external_source=…&external_id=…`   | `*WorkItem` / `ErrNotFound` |
 | `ListProjectStates`      | GET    | `/workspaces/{slug}/projects/{pid}/states/`                                   | `[]State`              |
+| `CreateComment`          | POST   | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/`                    | `*CommentResponse`     |
+| `UpdateComment`          | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `*CommentResponse`     |
+| `DeleteComment`          | DELETE | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `error` / `ErrNotFound` |
+
+### Comments
+
+Comments are scoped to a work item. Plane stores rich text in
+`comment_html` and identifies each comment by a server-assigned UUID
+(`comment-uuid` in the table above) that is independent of the forge's
+own comment ID — the mapping between the two lives in the bridge's
+loop-break marker, not in either system's primary key. `Access` is
+either `"INTERNAL"` (visible only to workspace members) or `"EXTERNAL"`
+(the default; visible to guests). `CreateComment` returns the created
+comment so the caller can read back the assigned UUID before recording
+it in the LRU.
+
+`CommentResponse` is a type alias for the existing `Comment` type used
+by the inbound webhook decoder — Plane's `IssueCommentSerializer` is the
+same serializer for the webhook payload and the REST response, so the
+two shapes do not need to be tracked separately.
 
 ### Error model
 
@@ -172,6 +197,18 @@ under-specifies the list endpoint:
    `apps/api/plane/api/middleware/api_authentication.py`.
 4. **Trailing slashes are mandatory.** Plane's URLConf does not redirect
    missing trailing slashes; the client constructs every path with one.
+5. **Comment endpoints.** The work-item detail endpoint is
+   `GET /workspaces/{slug}/projects/{pid}/issues/{iid}/` and comments
+   are nested under the work item:
+   `POST/GET .../issues/{iid}/comments/` and
+   `PATCH/DELETE .../issues/{iid}/comments/{cid}/`. The detail view also
+   accepts `GET` per `IssueCommentDetailAPIEndpoint`'s `http_method_names`
+   list. Source: `apps/api/plane/api/urls/work_item.py` (the
+   `IssueDetailAPIEndpoint` and `IssueCommentListCreateAPIEndpoint` /
+   `IssueCommentDetailAPIEndpoint` path entries) and
+   `apps/api/plane/api/serializers/issue.py` (`IssueCommentSerializer`,
+   which is also the serializer Plane uses for the webhook payload — so
+   the REST and webhook comment shapes match field-for-field).
 
 ## Open questions
 
@@ -196,9 +233,8 @@ them block the parse/verify happy path but each is a known unknown:
 4. **No comment_deleted fixture.** Added the kind for symmetry; we
    should capture a real payload before relying on it.
 5. **REST API client extras.** `Client` covers the v1 issue
-   create/update/lookup + state list surface (see "Client (outbound
-   REST)" above). Comment create/update on the Plane side is still
-   to come.
+   create/update/lookup + state list surface and the comment
+   create/update/delete surface (see "Client (outbound REST)" above).
 
 ## Fixtures
 
