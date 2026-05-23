@@ -956,6 +956,369 @@ func TestHandle_IssueEdited_DoesNotChangeState(t *testing.T) {
 	}
 }
 
+// mkPREvent builds a forge.Event for a pull_request.* delivery. The
+// default link in newTestEngine has no PR automation configured, so each
+// PR test enables it explicitly (matches the opt-in design — operators
+// without ProjectIdentifier + PRStateMap get plain comment/issue mirror
+// only).
+func mkPREvent(kind forge.EventKind, title, body, headRef string, merged bool) *forge.Event {
+	return &forge.Event{
+		Kind:       kind,
+		DeliveryID: "delivery-pr",
+		Repo: forge.Repository{
+			ID:       100,
+			FullName: testRepo,
+			HTMLURL:  "https://forge.example.com/acme/widgets",
+		},
+		Sender: forge.User{
+			Login:   testForgeUser,
+			HTMLURL: "https://forge.example.com/" + testForgeUser,
+		},
+		PullRequest: &forge.PullRequest{
+			ID:     900,
+			Number: 12,
+			Title:  title,
+			Body:   body,
+			State:  "open",
+			Merged: merged,
+			Head:   forge.PRBranch{Ref: headRef, SHA: "deadbeef"},
+			Base:   forge.PRBranch{Ref: "main", SHA: "cafef00d"},
+			User: forge.User{
+				Login:   testForgeUser,
+				HTMLURL: "https://forge.example.com/" + testForgeUser,
+			},
+		},
+	}
+}
+
+// enablePRAutomation configures the test engine's link with an
+// identifier + a default PRStateMap covering all four supported keys.
+// Returns the configured states list the fake should serve so tests
+// don't have to keep these in sync manually.
+func enablePRAutomation(e *Engine) {
+	e.Links[0].ProjectIdentifier = "PFB"
+	e.Links[0].PRStateMap = map[string]string{
+		"opened": "In Progress",
+		"merged": "Done",
+		"closed": "Cancelled",
+	}
+}
+
+// prStates returns the project state list used by the PR tests: a
+// superset covering the three names enablePRAutomation references.
+func prStates() []plane.State {
+	return []plane.State{
+		{ID: "state-todo", Name: "Todo", Group: "unstarted"},
+		{ID: "state-inprogress", Name: "In Progress", Group: "started"},
+		{ID: "state-done", Name: "Done", Group: "completed"},
+		{ID: "state-cancelled", Name: "Cancelled", Group: "cancelled"},
+	}
+}
+
+func TestHandle_PullRequestOpened_UpdatesState(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, seq int) (*plane.WorkItem, error) {
+		if seq != 42 {
+			t.Errorf("seq=%d, want 42", seq)
+		}
+		return &plane.WorkItem{ID: "wi-pr-42", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestOpened, "[PFB-42] fix login", "", "fix-login", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionUpdated {
+		t.Fatalf("action=%v, want ActionUpdated", out.Action)
+	}
+	if out.WorkItemID != "wi-pr-42" {
+		t.Errorf("WorkItemID=%q", out.WorkItemID)
+	}
+	if len(fc.Updates) != 1 {
+		t.Fatalf("want 1 UpdateIssue call, got %d", len(fc.Updates))
+	}
+	upd := fc.Updates[0]
+	if upd.IssueID != "wi-pr-42" {
+		t.Errorf("update against %q", upd.IssueID)
+	}
+	if upd.Req.StateID == nil || *upd.Req.StateID != "state-inprogress" {
+		t.Errorf("StateID=%v, want state-inprogress", upd.Req.StateID)
+	}
+	if upd.Req.Name != nil || upd.Req.DescriptionHTML != nil || upd.Req.Labels != nil {
+		t.Errorf("PR update should only touch StateID; got Name=%v Desc=%v Labels=%v",
+			upd.Req.Name, upd.Req.DescriptionHTML, upd.Req.Labels)
+	}
+}
+
+func TestHandle_PullRequestMerged_UsesMergedState(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, _ int) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-merged", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestClosed, "[PFB-7] merge me", "", "feature/x", true)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionUpdated {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if fc.Updates[0].Req.StateID == nil || *fc.Updates[0].Req.StateID != "state-done" {
+		t.Errorf("StateID=%v, want state-done (merged → Done)", fc.Updates[0].Req.StateID)
+	}
+}
+
+func TestHandle_PullRequestClosedUnmerged_UsesClosedState(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, _ int) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-closed", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestClosed, "[PFB-7] abandoned", "", "feature/x", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionUpdated {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if fc.Updates[0].Req.StateID == nil || *fc.Updates[0].Req.StateID != "state-cancelled" {
+		t.Errorf("StateID=%v, want state-cancelled (closed-unmerged → Cancelled)", fc.Updates[0].Req.StateID)
+	}
+}
+
+func TestHandle_PullRequestReopened_UsesOpenedState(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, _ int) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-reopened", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestReopened, "[PFB-7] back from the dead", "", "feature/x", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionUpdated {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if fc.Updates[0].Req.StateID == nil || *fc.Updates[0].Req.StateID != "state-inprogress" {
+		t.Errorf("StateID=%v, want state-inprogress (reopened → In Progress)", fc.Updates[0].Req.StateID)
+	}
+}
+
+func TestHandle_PullRequest_NoLink_Skips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	evt := mkPREvent(forge.EventPullRequestOpened, "[PFB-1] x", "", "pfb-1-x", false)
+	evt.Repo.FullName = "other/repo"
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if out.Reason != "no link configured for repo" {
+		t.Errorf("Reason=%q", out.Reason)
+	}
+	if len(fc.Updates)+len(fc.GetsBySeq)+len(fc.Lists) != 0 {
+		t.Errorf("no-link skip made API calls")
+	}
+}
+
+func TestHandle_PullRequest_NoAutomationConfigured_Skips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	// Default link has no ProjectIdentifier or PRStateMap — PR
+	// automation is opt-in.
+	evt := mkPREvent(forge.EventPullRequestOpened, "[PFB-1] x", "", "pfb-1-x", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if !strings.Contains(out.Reason, "no PR automation configured") {
+		t.Errorf("Reason=%q does not name the missing automation", out.Reason)
+	}
+	if out.Link == nil {
+		t.Error("Link nil — automation skip still matched a link")
+	}
+	if len(fc.Updates)+len(fc.GetsBySeq)+len(fc.Lists) != 0 {
+		t.Errorf("no-automation skip made API calls")
+	}
+}
+
+func TestHandle_PullRequest_NoRef_Skips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	evt := mkPREvent(forge.EventPullRequestOpened, "unrelated title", "no body refs", "feature/no-ref", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if !strings.Contains(out.Reason, "no [PFB-N] ref found") {
+		t.Errorf("Reason=%q does not point at the missing ref", out.Reason)
+	}
+	if len(fc.GetsBySeq) != 0 {
+		t.Errorf("no-ref skip looked up by sequence id")
+	}
+}
+
+func TestHandle_PullRequest_WorkItemNotFound_Skips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	// Default GetIssueBySequenceID returns ErrNotFound.
+	evt := mkPREvent(forge.EventPullRequestOpened, "[PFB-404] missing", "", "pfb-404", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if !strings.Contains(out.Reason, "does not exist on the configured Plane project") {
+		t.Errorf("Reason=%q does not name the missing work item", out.Reason)
+	}
+	if len(fc.GetsBySeq) != 1 {
+		t.Errorf("want 1 GetIssueBySequenceID call, got %d", len(fc.GetsBySeq))
+	}
+	if len(fc.Updates) != 0 {
+		t.Errorf("work-item-not-found path called UpdateIssue")
+	}
+}
+
+func TestHandle_PullRequest_NoActionMapping_Skips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	// Drop "merged" so a merge event has no mapping.
+	delete(e.Links[0].PRStateMap, "merged")
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, _ int) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-x", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestClosed, "[PFB-9] x", "", "x", true)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if !strings.Contains(out.Reason, `action "merged"`) {
+		t.Errorf("Reason=%q does not name the missing action", out.Reason)
+	}
+	if len(fc.Updates) != 0 {
+		t.Errorf("no-mapping path called UpdateIssue")
+	}
+}
+
+func TestHandle_PullRequest_StateNameNotInProject_Errors(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	// PRStateMap names a state that doesn't exist on the project.
+	e.Links[0].PRStateMap["opened"] = "Nonexistent State"
+	fc.ListProjectStatesFunc = func(_ context.Context, _ string) ([]plane.State, error) {
+		return prStates(), nil
+	}
+	fc.GetIssueBySequenceIDFunc = func(_ context.Context, projectID string, _ int) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-x", Project: projectID}, nil
+	}
+	evt := mkPREvent(forge.EventPullRequestOpened, "[PFB-1] x", "", "pfb-1", false)
+
+	_, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err == nil {
+		t.Fatal("expected error for misconfigured state name")
+	}
+	if !strings.Contains(err.Error(), "Nonexistent State") {
+		t.Errorf("error=%v does not name the offending state", err)
+	}
+	if len(fc.Updates) != 0 {
+		t.Errorf("config-error path called UpdateIssue")
+	}
+}
+
+func TestHandle_PullRequestReview_Skipped_Deferred(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	evt := mkPREvent(forge.EventPullRequestReview, "[PFB-1] x", "", "pfb-1", false)
+	evt.Review = &forge.Review{ID: 1, Type: "pull_request_review_approved"}
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if !strings.Contains(out.Reason, "review event handling deferred") {
+		t.Errorf("Reason=%q does not name the deferral", out.Reason)
+	}
+	if len(fc.Updates)+len(fc.GetsBySeq) != 0 {
+		t.Errorf("review path made API calls")
+	}
+}
+
+func TestHandle_PullRequestEdited_Skipped(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	enablePRAutomation(e)
+	evt := mkPREvent(forge.EventPullRequestEdited, "[PFB-1] x", "", "pfb-1", false)
+
+	out, err := e.HandleForgePullRequest(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped (edits shouldn't move state)", out.Action)
+	}
+	if !strings.Contains(out.Reason, "does not map to a state transition") {
+		t.Errorf("Reason=%q does not name the missing action mapping", out.Reason)
+	}
+	if len(fc.Updates) != 0 {
+		t.Errorf("edited path called UpdateIssue")
+	}
+}
+
 // TestHandle_IssueEdited_PropagatesLabelChanges confirms forge label
 // changes on an existing issue propagate to Plane via the edit update.
 // forge fires issues.edited for label add/remove events, so the edit
