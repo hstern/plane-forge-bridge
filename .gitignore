@@ -1,0 +1,23 @@
+# Binaries
+/plane-forge-bridge
+/bin/
+/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Local config / secrets
+config.yaml
+config.yml
+.env
+.env.*
+!.env.example
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
