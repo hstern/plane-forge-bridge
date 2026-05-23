@@ -922,6 +922,99 @@ func TestGetIssueBySequenceID_APIError(t *testing.T) {
 	}
 }
 
+func TestListWorkspaceMembers_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		// Bare array — not a {"results": [...]} envelope. Confirmed
+		// empirically against plane.stern.ca on 2026-05-23.
+		_, _ = io.WriteString(w, `[
+            {"id":"m1","email":"alice@example.com","display_name":"alice","first_name":"Alice","last_name":"Anderson","role":20},
+            {"id":"m2","email":"bob@example.com","display_name":"bob","role":15}
+        ]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListWorkspaceMembers(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if want := "/workspaces/acme/members/"; gotPath != want {
+		t.Errorf("path = %q, want %q (trailing slash is mandatory)", gotPath, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("members = %+v, want 2 rows", got)
+	}
+	if got[0].ID != "m1" || got[0].Email != "alice@example.com" || got[0].DisplayName != "alice" ||
+		got[0].FirstName != "Alice" || got[0].LastName != "Anderson" || got[0].Role != 20 {
+		t.Errorf("members[0] = %+v, want {ID:m1 Email:alice@example.com DisplayName:alice FirstName:Alice LastName:Anderson Role:20}", got[0])
+	}
+	if got[1].ID != "m2" || got[1].Email != "bob@example.com" || got[1].DisplayName != "bob" || got[1].Role != 15 {
+		t.Errorf("members[1] = %+v, want {ID:m2 Email:bob@example.com DisplayName:bob Role:15}", got[1])
+	}
+}
+
+func TestListWorkspaceMembers_Empty(t *testing.T) {
+	t.Parallel()
+
+	// Plane returns a bare empty JSON array when a workspace has no
+	// members visible to the token. Decodes to a nil slice — the zero
+	// value of []Member. Callers should use len(got) rather than == nil.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListWorkspaceMembers(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("members = %+v, want empty", got)
+	}
+}
+
+func TestListWorkspaceMembers_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.ListWorkspaceMembers(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if apiErr.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", apiErr.Method)
+	}
+	if !strings.Contains(apiErr.Body, "boom") {
+		t.Errorf("Body = %q, want upstream message preserved", apiErr.Body)
+	}
+}
+
 // keys returns the sorted keys of m for use in error messages.
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
