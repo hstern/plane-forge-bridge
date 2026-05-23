@@ -48,7 +48,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeClient) {
 	}
 	cfg.BridgeBot.ForgeUsername = "pfb-bot"
 	cfg.BridgeBot.PlaneMemberID = "plane-uuid-bot"
-	return NewEngine(fc, cfg, testLogger()), fc
+	return NewEngine(fc, nil, cfg, testLogger()), fc
 }
 
 // mkIssueEvent builds a forge.Event for an issue.* delivery. Callers

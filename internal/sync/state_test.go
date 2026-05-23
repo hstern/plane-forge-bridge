@@ -24,7 +24,7 @@ func newStateLink(stateMap map[string]string) *mapping.Link {
 func TestResolveStateID_HappyPath(t *testing.T) {
 	t.Parallel()
 	fc := &fakeClient{}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"closed": "Done"})
 
 	id, err := e.ResolveStateID(context.Background(), link, "closed")
@@ -39,7 +39,7 @@ func TestResolveStateID_HappyPath(t *testing.T) {
 func TestResolveStateID_NoMappingReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	fc := &fakeClient{}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"open": "Todo"})
 
 	id, err := e.ResolveStateID(context.Background(), link, "closed")
@@ -58,7 +58,7 @@ func TestResolveStateID_NoMappingReturnsEmpty(t *testing.T) {
 func TestResolveStateID_NameNotInProject(t *testing.T) {
 	t.Parallel()
 	fc := &fakeClient{}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"closed": "Bogus"})
 
 	id, err := e.ResolveStateID(context.Background(), link, "closed")
@@ -77,7 +77,7 @@ func TestResolveStateID_PropagatesListError(t *testing.T) {
 			return nil, errors.New("boom")
 		},
 	}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"closed": "Done"})
 
 	if _, err := e.ResolveStateID(context.Background(), link, "closed"); err == nil {
@@ -96,7 +96,7 @@ func TestResolveStateID_CachesAcrossCalls(t *testing.T) {
 			}, nil
 		},
 	}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"closed": "Done"})
 
 	for i := 0; i < 5; i++ {
@@ -127,7 +127,7 @@ func TestResolveStateID_ConcurrentCachesCoalesce(t *testing.T) {
 			}, nil
 		},
 	}
-	e := NewEngine(fc, &mapping.Resolved{}, testLogger())
+	e := NewEngine(fc, nil, &mapping.Resolved{}, testLogger())
 	link := newStateLink(map[string]string{"closed": "Done"})
 
 	var wg stdsync.WaitGroup

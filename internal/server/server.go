@@ -19,11 +19,15 @@ import (
 	pfbsync "github.com/hstern/plane-forge-bridge/internal/sync"
 )
 
-// Translator is the surface server uses to translate a parsed forge event
-// into outbound Plane calls. Production wires this to *sync.Engine; tests
-// substitute a hand-written fake.
+// Translator is the surface server uses to translate parsed webhook events
+// into outbound calls on the other side. Production wires this to
+// *sync.Engine; tests substitute a hand-written fake. Methods are scoped
+// by direction (forge→plane vs plane→forge) and event family (issue vs
+// comment) so a fake can stub only what a test exercises.
 type Translator interface {
 	HandleForgeIssue(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
+	HandleForgeComment(ctx context.Context, evt *forge.Event) (*pfbsync.Outcome, error)
+	HandlePlaneComment(ctx context.Context, evt *plane.Event) (*pfbsync.Outcome, error)
 }
 
 // maxBodyBytes caps webhook bodies. Gitea/Forgejo and Plane payloads are well
@@ -99,39 +103,90 @@ func (s *Server) handleForge(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if s.translator != nil && isForgeIssueEvent(evt.Kind) {
-		outcome, terr := s.translator.HandleForgeIssue(r.Context(), evt)
-		if terr != nil {
-			s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed",
-				slog.String("delivery_id", evt.DeliveryID),
-				slog.String("err", terr.Error()),
-			)
-			http.Error(w, "translator error", http.StatusInternalServerError)
+	if s.translator != nil {
+		switch {
+		case isForgeIssueEvent(evt.Kind):
+			s.dispatchForgeIssue(w, r, evt)
 			return
-		}
-		s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge event translated",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("action", actionString(outcome.Action)),
-			slog.String("work_item_id", outcome.WorkItemID),
-			slog.String("reason", outcome.Reason),
-		)
-		if outcome.WorkItemID != "" {
-			// Record (sourceEventID, targetObjID) so an echoed Plane webhook
-			// caused by this write can be dropped via the LRU even if the
-			// marker is stripped downstream.
-			s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.WorkItemID)
+		case isForgeCommentEvent(evt.Kind):
+			s.dispatchForgeComment(w, r, evt)
+			return
 		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// isForgeIssueEvent reports whether a forge event is one the issue translator
-// handles. Other kinds (push, pull_request_review, etc.) are accepted by the
-// webhook endpoint but not dispatched to translation in step 6.
+func (s *Server) dispatchForgeIssue(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
+	outcome, terr := s.translator.HandleForgeIssue(r.Context(), evt)
+	if terr != nil {
+		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge issue)",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("err", terr.Error()),
+		)
+		http.Error(w, "translator error", http.StatusInternalServerError)
+		return
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge issue translated",
+		slog.String("delivery_id", evt.DeliveryID),
+		slog.String("action", actionString(outcome.Action)),
+		slog.String("work_item_id", outcome.WorkItemID),
+		slog.String("reason", outcome.Reason),
+	)
+	if outcome.WorkItemID != "" {
+		s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.WorkItemID)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) dispatchForgeComment(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
+	outcome, terr := s.translator.HandleForgeComment(r.Context(), evt)
+	if terr != nil {
+		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge comment)",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("err", terr.Error()),
+		)
+		http.Error(w, "translator error", http.StatusInternalServerError)
+		return
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge comment translated",
+		slog.String("delivery_id", evt.DeliveryID),
+		slog.String("action", actionString(outcome.Action)),
+		slog.String("work_item_id", outcome.WorkItemID),
+		slog.String("comment_id", outcome.CommentID),
+		slog.String("reason", outcome.Reason),
+	)
+	if outcome.CommentID != "" {
+		s.dedupe.Record(idemp.SourceForge, evt.DeliveryID, outcome.CommentID)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// isForgeIssueEvent reports whether a forge event is an issue-lifecycle event.
 func isForgeIssueEvent(k forge.EventKind) bool {
 	switch k {
 	case forge.EventIssueOpened, forge.EventIssueEdited, forge.EventIssueClosed,
 		forge.EventIssueReopened:
+		return true
+	default:
+		return false
+	}
+}
+
+// isForgeCommentEvent reports whether a forge event is an issue-comment event.
+func isForgeCommentEvent(k forge.EventKind) bool {
+	switch k {
+	case forge.EventIssueCommentCreated, forge.EventIssueCommentEdited,
+		forge.EventIssueCommentDeleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// isPlaneCommentEvent reports whether a plane event is a comment event.
+func isPlaneCommentEvent(k plane.EventKind) bool {
+	switch k {
+	case plane.EventCommentCreated, plane.EventCommentUpdated, plane.EventCommentDeleted:
 		return true
 	default:
 		return false
@@ -173,6 +228,32 @@ func (s *Server) handlePlane(w http.ResponseWriter, r *http.Request) {
 		)
 		w.WriteHeader(http.StatusOK)
 		return
+	}
+	if s.translator != nil && isPlaneCommentEvent(evt.Kind) {
+		s.dispatchPlaneComment(w, r, evt)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) dispatchPlaneComment(w http.ResponseWriter, r *http.Request, evt *plane.Event) {
+	outcome, terr := s.translator.HandlePlaneComment(r.Context(), evt)
+	if terr != nil {
+		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (plane comment)",
+			slog.String("delivery_id", evt.DeliveryID),
+			slog.String("err", terr.Error()),
+		)
+		http.Error(w, "translator error", http.StatusInternalServerError)
+		return
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "plane comment translated",
+		slog.String("delivery_id", evt.DeliveryID),
+		slog.String("action", actionString(outcome.Action)),
+		slog.String("comment_id", outcome.CommentID),
+		slog.String("reason", outcome.Reason),
+	)
+	if outcome.CommentID != "" {
+		s.dedupe.Record(idemp.SourcePlane, evt.DeliveryID, outcome.CommentID)
 	}
 	w.WriteHeader(http.StatusAccepted)
 }

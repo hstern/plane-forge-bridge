@@ -129,9 +129,10 @@ type Engine struct {
 	stateCache stateCache
 }
 
-// NewEngine constructs an Engine from a PlaneClient and the resolved
+// NewEngine constructs an Engine from a PlaneClient, a ForgeClient (which
+// may be nil if the deployment only mirrors forge→plane), and the resolved
 // configuration. If log is nil, slog.Default() is used.
-func NewEngine(c PlaneClient, cfg *mapping.Resolved, log *slog.Logger) *Engine {
+func NewEngine(plane PlaneClient, forgeC ForgeClient, cfg *mapping.Resolved, log *slog.Logger) *Engine {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -147,11 +148,12 @@ func NewEngine(c PlaneClient, cfg *mapping.Resolved, log *slog.Logger) *Engine {
 		users = cfg.Users
 	}
 	return &Engine{
-		Client: c,
-		Links:  links,
-		Users:  users,
-		Bot:    bot,
-		Log:    log,
+		Client:      plane,
+		ForgeClient: forgeC,
+		Links:       links,
+		Users:       users,
+		Bot:         bot,
+		Log:         log,
 	}
 }
 

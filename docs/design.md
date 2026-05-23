@@ -314,7 +314,8 @@ The build order from the scaffolding brief:
 4. Multi-stage Dockerfile + `test/e2e-docker/plane-stub`. ← *done*
 5. `.github/workflows/ci.yaml` modeled on `fj-bellows`. ← *done*
 6. Issue create/update/close translation (forge → plane). ← *done*
-7. Comments both ways with loop-break marker.
+7. Comments both ways with loop-break marker. ← *done (create only;
+   edit/delete deferred pending persistent comment-identity storage)*
 8. Labels + state mapping.
 9. PR / branch → work-item state automation.
 10. Plane → forge direction.

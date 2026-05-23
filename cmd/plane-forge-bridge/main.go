@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hstern/plane-forge-bridge/internal/forge"
 	"github.com/hstern/plane-forge-bridge/internal/mapping"
 	"github.com/hstern/plane-forge-bridge/internal/plane"
 	"github.com/hstern/plane-forge-bridge/internal/server"
@@ -62,7 +63,11 @@ func run(args []string, stdout, stderr *os.File) error {
 		&http.Client{Timeout: 30 * time.Second})
 	planeClient.UserAgent = "plane-forge-bridge/" + version
 
-	translator := pfbsync.NewEngine(planeClient, cfg, logger)
+	forgeClient := forge.NewClient(cfg.Forge.BaseURL, cfg.Forge.Token,
+		&http.Client{Timeout: 30 * time.Second})
+	forgeClient.UserAgent = "plane-forge-bridge/" + version
+
+	translator := pfbsync.NewEngine(planeClient, forgeClient, cfg, logger)
 	srv := server.New(cfg, logger, translator)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
