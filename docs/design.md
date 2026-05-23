@@ -316,7 +316,10 @@ The build order from the scaffolding brief:
 6. Issue create/update/close translation (forge → plane). ← *done*
 7. Comments both ways with loop-break marker. ← *done (create only;
    edit/delete deferred pending persistent comment-identity storage)*
-8. Labels + state mapping.
+8. Labels + state mapping. ← *done for forge→plane (auto-create labels
+   on plane, apply state_map on create/reconcile/close/reopen). Forge
+   label helpers landed too; consumed when step 10's plane→forge issue
+   path lands.*
 9. PR / branch → work-item state automation.
 10. Plane → forge direction.
 11. v2: Plane→workspace-members API for identity (no custom OAuth needed —

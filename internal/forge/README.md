@@ -90,21 +90,35 @@ func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int64)
 func (c *Client) CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req CreateCommentRequest) (*Comment, error)
 func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentID int64, req UpdateCommentRequest) (*Comment, error)
 func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
+func (c *Client) ListRepoLabels(ctx context.Context, owner, repo string) ([]Label, error)
+func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req CreateLabelRequest) (*Label, error)
 ```
 
-| Method          | HTTP   | Path                                                       | Returns                |
-| --------------- | ------ | ---------------------------------------------------------- | ---------------------- |
-| `GetIssue`      | GET    | `/api/v1/repos/{owner}/{repo}/issues/{number}`             | `*Issue` / `ErrNotFound` |
-| `CreateComment` | POST   | `/api/v1/repos/{owner}/{repo}/issues/{index}/comments`     | `*Comment`             |
-| `UpdateComment` | PATCH  | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `*Comment`             |
-| `DeleteComment` | DELETE | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `nil` / `ErrNotFound`  |
+| Method            | HTTP   | Path                                                       | Returns                  |
+| ----------------- | ------ | ---------------------------------------------------------- | ------------------------ |
+| `GetIssue`        | GET    | `/api/v1/repos/{owner}/{repo}/issues/{number}`             | `*Issue` / `ErrNotFound` |
+| `CreateComment`   | POST   | `/api/v1/repos/{owner}/{repo}/issues/{index}/comments`     | `*Comment`               |
+| `UpdateComment`   | PATCH  | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `*Comment`               |
+| `DeleteComment`   | DELETE | `/api/v1/repos/{owner}/{repo}/issues/comments/{id}`        | `nil` / `ErrNotFound`    |
+| `ListRepoLabels`  | GET    | `/api/v1/repos/{owner}/{repo}/labels?page=1&limit=50`      | `[]Label`                |
+| `CreateRepoLabel` | POST   | `/api/v1/repos/{owner}/{repo}/labels`                      | `*Label`                 |
 
 Request bodies:
 
 ```go
 type CreateCommentRequest struct { Body string `json:"body"` }
 type UpdateCommentRequest struct { Body string `json:"body"` }
+type CreateLabelRequest   struct {
+    Name        string `json:"name"`
+    Color       string `json:"color"`
+    Description string `json:"description,omitempty"`
+}
 ```
+
+Forge list endpoints return a bare JSON array, NOT a `{results: [...]}`
+envelope (that's Plane's convention). `ListRepoLabels` decodes straight
+into `[]Label`. Pagination is via `page` + `limit` query params; v1
+requests the first 50 labels, which covers any realistic repo.
 
 The comment endpoints today only accept `body`; the request types stay
 as structs (rather than `map[string]string`) so future optional fields

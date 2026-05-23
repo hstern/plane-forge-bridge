@@ -39,6 +39,8 @@ type PlaneClient interface {
 	CreateIssue(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssue(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStates(ctx context.Context, projectID string) ([]plane.State, error)
+	ListProjectLabels(ctx context.Context, projectID string) ([]plane.Label, error)
+	CreateProjectLabel(ctx context.Context, projectID string, req plane.CreateLabelRequest) (*plane.Label, error)
 	CreateComment(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
 	UpdateComment(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
@@ -49,6 +51,8 @@ type PlaneClient interface {
 // expected to satisfy this interface; tests substitute a hand-written fake.
 type ForgeClient interface {
 	GetIssue(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
+	ListRepoLabels(ctx context.Context, owner, repo string) ([]forge.Label, error)
+	CreateRepoLabel(ctx context.Context, owner, repo string, req forge.CreateLabelRequest) (*forge.Label, error)
 	CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
 	UpdateComment(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
 	DeleteComment(ctx context.Context, owner, repo string, commentID int64) error
@@ -127,6 +131,7 @@ type Engine struct {
 	Log         *slog.Logger
 
 	stateCache stateCache
+	labelCache labelCache
 }
 
 // NewEngine constructs an Engine from a PlaneClient, a ForgeClient (which
@@ -309,6 +314,13 @@ func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mappi
 	} else if stateID != "" {
 		req.StateID = stateID
 	}
+	labels, err := e.resolveLabels(ctx, link.PlaneProjectID, forgeLabelNames(evt.Issue.Labels))
+	if err != nil {
+		return nil, fmt.Errorf("sync: resolve labels: %w", err)
+	}
+	if len(labels) > 0 {
+		req.Labels = labels
+	}
 
 	wi, err := e.Client.CreateIssue(ctx, link.PlaneProjectID, req)
 	if err != nil {
@@ -356,6 +368,27 @@ func (e *Engine) handleEdited(ctx context.Context, evt *forge.Event, link *mappi
 	req := plane.UpdateIssueRequest{
 		Name:            &name,
 		DescriptionHTML: &desc,
+	}
+	// We deliberately do NOT set StateID on edits. forge fires
+	// `issues.edited` for any property change (title, body, assignee,
+	// labels), and the event payload doesn't reliably tell us whether the
+	// state changed. The explicit state transitions arrive as IssueClosed /
+	// IssueReopened where we DO translate via link.StateMap. Touching state
+	// on edit risks moving Plane backwards when a user edits the title of a
+	// closed forge issue.
+	labels, err := e.resolveLabels(ctx, link.PlaneProjectID, forgeLabelNames(evt.Issue.Labels))
+	if err != nil {
+		return nil, fmt.Errorf("sync: resolve labels: %w", err)
+	}
+	// Only assign when we actually resolved a non-empty set. The plane
+	// CreateIssueRequest.Labels tag is omitempty, so a nil/empty slice is
+	// indistinguishable on the wire and leaves Plane's labels alone. An
+	// operator removing every forge label is therefore NOT mirrored to
+	// Plane today — a deliberate v1 limitation, since the alternative
+	// would require a separate "clear labels" PATCH that Plane's API
+	// shape doesn't cleanly support via this omitempty field.
+	if len(labels) > 0 {
+		req.Labels = labels
 	}
 	wi, err := e.Client.UpdateIssue(ctx, link.PlaneProjectID, existing.ID, req)
 	if err != nil {
@@ -429,6 +462,13 @@ func (e *Engine) reconcile(ctx context.Context, evt *forge.Event, link *mapping.
 		return nil, fmt.Errorf("sync: resolve %s state: %w", forgeState, err)
 	} else if stateID != "" {
 		req.StateID = &stateID
+	}
+	labels, err := e.resolveLabels(ctx, link.PlaneProjectID, forgeLabelNames(evt.Issue.Labels))
+	if err != nil {
+		return nil, fmt.Errorf("sync: resolve labels: %w", err)
+	}
+	if len(labels) > 0 {
+		req.Labels = labels
 	}
 
 	wi, err := e.Client.UpdateIssue(ctx, link.PlaneProjectID, existing.ID, req)

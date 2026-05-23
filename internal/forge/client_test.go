@@ -390,6 +390,230 @@ func TestClient_UserAgentDefaultAndOverride(t *testing.T) {
 	}
 }
 
+func TestListRepoLabels_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	// Forge list endpoints return a bare JSON array, NOT a {results: [...]}
+	// envelope. This test pins that contract — if the client ever grows an
+	// envelope unwrap, this is the regression target.
+	var (
+		gotMethod string
+		gotPath   string
+		gotQuery  string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		assertCommonHeaders(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Label{
+			{ID: 1, Name: "bug", Color: "#ee0701"},
+			{ID: 2, Name: "enhancement", Color: "#84b6eb"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListRepoLabels(context.Background(), "acme", "widgets")
+	if err != nil {
+		t.Fatalf("ListRepoLabels: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if want := "/api/v1/repos/acme/widgets/labels"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if want := "page=1&limit=50"; gotQuery != want {
+		t.Errorf("query = %q, want %q", gotQuery, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(labels) = %d, want 2", len(got))
+	}
+	if got[0].ID != 1 || got[0].Name != "bug" || got[0].Color != "#ee0701" {
+		t.Errorf("labels[0] = %+v, want {ID:1 Name:bug Color:#ee0701}", got[0])
+	}
+	if got[1].ID != 2 || got[1].Name != "enhancement" {
+		t.Errorf("labels[1] = %+v, want {ID:2 Name:enhancement ...}", got[1])
+	}
+}
+
+func TestListRepoLabels_Empty(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.ListRepoLabels(context.Background(), "acme", "widgets")
+	if err != nil {
+		t.Fatalf("ListRepoLabels: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len(labels) = %d, want 0 (got %+v)", len(got), got)
+	}
+}
+
+func TestListRepoLabels_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"db is down"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.ListRepoLabels(context.Background(), "acme", "widgets")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "db is down") {
+		t.Errorf("Body = %q, want it to include the upstream message", apiErr.Body)
+	}
+	if apiErr.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", apiErr.Method)
+	}
+}
+
+func TestCreateRepoLabel_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   CreateLabelRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode req body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Label{
+			ID:    99,
+			Name:  gotBody.Name,
+			Color: gotBody.Color,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.CreateRepoLabel(context.Background(), "acme", "widgets", CreateLabelRequest{
+		Name:        "needs-triage",
+		Color:       "#00ff00",
+		Description: "fresh from the bridge",
+	})
+	if err != nil {
+		t.Fatalf("CreateRepoLabel: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if want := "/api/v1/repos/acme/widgets/labels"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotBody.Name != "needs-triage" || gotBody.Color != "#00ff00" || gotBody.Description != "fresh from the bridge" {
+		t.Errorf("body = %+v, want Name=needs-triage Color=#00ff00 Description=fresh from the bridge", gotBody)
+	}
+	if got.ID != 99 || got.Name != "needs-triage" || got.Color != "#00ff00" {
+		t.Errorf("returned label = %+v, want ID=99 Name=needs-triage Color=#00ff00", got)
+	}
+}
+
+func TestCreateRepoLabel_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"message":"label name already exists"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.CreateRepoLabel(context.Background(), "acme", "widgets", CreateLabelRequest{
+		Name:  "bug",
+		Color: "#ee0701",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want 422", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "label name already exists") {
+		t.Errorf("Body = %q, want it to include the upstream message", apiErr.Body)
+	}
+}
+
+func TestCreateRepoLabel_RequiredFields(t *testing.T) {
+	t.Parallel()
+
+	// Pin the wire shape: Gitea/Forgejo require `name` and `color`; an
+	// empty description must be omitted (json:"description,omitempty")
+	// rather than sent as an empty string. This is what every upstream
+	// example in the API docs shows and a few older Gitea versions
+	// reject an explicit empty description.
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read req body: %v", err)
+		}
+		rawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Label{ID: 1, Name: "bug", Color: "#ee0701"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	if _, err := c.CreateRepoLabel(context.Background(), "acme", "widgets", CreateLabelRequest{
+		Name:  "bug",
+		Color: "#ee0701",
+	}); err != nil {
+		t.Fatalf("CreateRepoLabel: %v", err)
+	}
+
+	// Decode into a map so we can assert key presence/absence.
+	var asMap map[string]any
+	if err := json.Unmarshal(rawBody, &asMap); err != nil {
+		t.Fatalf("unmarshal sent body %q: %v", rawBody, err)
+	}
+	if got := asMap["name"]; got != "bug" {
+		t.Errorf(`body["name"] = %v, want "bug"`, got)
+	}
+	if got := asMap["color"]; got != "#ee0701" {
+		t.Errorf(`body["color"] = %v, want "#ee0701"`, got)
+	}
+	if _, present := asMap["description"]; present {
+		t.Errorf("body contains description key when value was empty; raw=%q", rawBody)
+	}
+}
+
 func TestClient_AuthorizationToken(t *testing.T) {
 	t.Parallel()
 

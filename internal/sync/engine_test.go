@@ -810,3 +810,173 @@ func TestHandle_PropagatesPlaneError(t *testing.T) {
 		t.Errorf("StatusCode=%d, want 500", got.StatusCode)
 	}
 }
+
+// TestHandle_IssueOpened_PropagatesLabels exercises the step-8 label
+// resolver on the create path: an opened forge issue with N labels triggers
+// one ListProjectLabels call, a CreateProjectLabel per missing name, and
+// the resulting Plane UUIDs land on the CreateIssueRequest in input order.
+func TestHandle_IssueOpened_PropagatesLabels(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.ListProjectLabelsFunc = func(_ context.Context, _ string) ([]plane.Label, error) {
+		// Only "bug" already exists; "good first issue" must be auto-created.
+		return []plane.Label{{ID: "lbl-bug", Name: "bug"}}, nil
+	}
+	fc.CreateProjectLabelFunc = func(_ context.Context, _ string, req plane.CreateLabelRequest) (*plane.Label, error) {
+		return &plane.Label{ID: "lbl-created-" + req.Name, Name: req.Name}, nil
+	}
+	evt := mkIssueEvent(forge.EventIssueOpened, testForgeUser)
+	evt.Issue.Labels = []forge.Label{
+		{ID: 1, Name: "bug"},
+		{ID: 2, Name: "good first issue"},
+	}
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.Creates) != 1 {
+		t.Fatalf("want 1 create, got %d", len(fc.Creates))
+	}
+	got := fc.Creates[0].Req.Labels
+	want := []string{"lbl-bug", "lbl-created-good first issue"}
+	if len(got) != len(want) {
+		t.Fatalf("Labels=%v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Labels[%d]=%q, want %q", i, got[i], w)
+		}
+	}
+	if len(fc.ListProjectLabelsCalls) != 1 {
+		t.Errorf("ListProjectLabels calls=%d, want 1", len(fc.ListProjectLabelsCalls))
+	}
+	if len(fc.CreateProjectLabelCalls) != 1 {
+		t.Errorf("CreateProjectLabel calls=%d, want 1", len(fc.CreateProjectLabelCalls))
+	} else if fc.CreateProjectLabelCalls[0].Req.Name != "good first issue" {
+		t.Errorf("created label name=%q", fc.CreateProjectLabelCalls[0].Req.Name)
+	}
+}
+
+// TestHandle_IssueOpened_LabelsAlreadyExist confirms the no-create fast
+// path: every forge label name already exists on the Plane side, so the
+// engine only calls ListProjectLabels and the UUIDs come straight from
+// the cached list.
+func TestHandle_IssueOpened_LabelsAlreadyExist(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.ListProjectLabelsFunc = func(_ context.Context, _ string) ([]plane.Label, error) {
+		return []plane.Label{
+			{ID: "lbl-bug", Name: "bug"},
+			{ID: "lbl-help", Name: "help wanted"},
+		}, nil
+	}
+	evt := mkIssueEvent(forge.EventIssueOpened, testForgeUser)
+	evt.Issue.Labels = []forge.Label{
+		{Name: "bug"},
+		{Name: "help wanted"},
+	}
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.CreateProjectLabelCalls) != 0 {
+		t.Errorf("CreateProjectLabel should not be called; got %d", len(fc.CreateProjectLabelCalls))
+	}
+	got := fc.Creates[0].Req.Labels
+	want := []string{"lbl-bug", "lbl-help"}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Labels[%d]=%q, want %q", i, got[i], w)
+		}
+	}
+}
+
+// TestHandle_IssueOpened_AppliesOpenStateMap is the step-8 state-coverage
+// guard: a forge issue.opened event with link.StateMap["open"]="Todo" must
+// land the Todo state UUID on the CreateIssueRequest. This was already
+// implemented in step 6 for the create path; the test pins it so the
+// behaviour can't silently regress.
+func TestHandle_IssueOpened_AppliesOpenStateMap(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	evt := mkIssueEvent(forge.EventIssueOpened, testForgeUser)
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fc.Creates[0].Req.StateID != "state-todo" {
+		t.Errorf("StateID=%q, want state-todo", fc.Creates[0].Req.StateID)
+	}
+}
+
+// TestHandle_IssueOpened_NoOpenStateMap_LeavesStateUnset confirms the
+// "we don't invent transitions" rule on the create path: if the link has
+// no "open" entry in StateMap, the engine leaves CreateIssueRequest.StateID
+// empty so Plane uses its project default.
+func TestHandle_IssueOpened_NoOpenStateMap_LeavesStateUnset(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	e.Links[0].StateMap = map[string]string{"closed": "Done"}
+	evt := mkIssueEvent(forge.EventIssueOpened, testForgeUser)
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fc.Creates[0].Req.StateID != "" {
+		t.Errorf("StateID=%q, want empty", fc.Creates[0].Req.StateID)
+	}
+	// We also assert ListProjectStates was NOT called: ResolveStateID
+	// short-circuits on a missing map entry before hitting the cache.
+	if len(fc.Lists) != 0 {
+		t.Errorf("unexpected ListProjectStates calls: %d", len(fc.Lists))
+	}
+}
+
+// TestHandle_IssueEdited_DoesNotChangeState pins the documented decision:
+// forge fires issues.edited for any property change, and the payload
+// doesn't reliably signal whether the state changed. We rely on
+// IssueClosed / IssueReopened for explicit transitions and leave Plane's
+// state alone on plain edits, even when link.StateMap has an "open" entry.
+func TestHandle_IssueEdited_DoesNotChangeState(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.GetIssueByExternalRefFunc = func(_ context.Context, projectID, _, _ string) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-existing", Project: projectID}, nil
+	}
+	evt := mkIssueEvent(forge.EventIssueEdited, testForgeUser)
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.Updates) != 1 {
+		t.Fatalf("want 1 update, got %d", len(fc.Updates))
+	}
+	if fc.Updates[0].Req.StateID != nil {
+		t.Errorf("edit must not touch StateID; got %v", *fc.Updates[0].Req.StateID)
+	}
+}
+
+// TestHandle_IssueEdited_PropagatesLabelChanges confirms forge label
+// changes on an existing issue propagate to Plane via the edit update.
+// forge fires issues.edited for label add/remove events, so the edit
+// branch is the only place these changes reach the engine.
+func TestHandle_IssueEdited_PropagatesLabelChanges(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.GetIssueByExternalRefFunc = func(_ context.Context, projectID, _, _ string) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-existing", Project: projectID}, nil
+	}
+	fc.ListProjectLabelsFunc = func(_ context.Context, _ string) ([]plane.Label, error) {
+		return []plane.Label{{ID: "lbl-bug", Name: "bug"}}, nil
+	}
+	evt := mkIssueEvent(forge.EventIssueEdited, testForgeUser)
+	evt.Issue.Labels = []forge.Label{{Name: "bug"}}
+
+	if _, err := e.HandleForgeIssue(context.Background(), evt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := fc.Updates[0].Req.Labels
+	if len(got) != 1 || got[0] != "lbl-bug" {
+		t.Errorf("Labels=%v, want [lbl-bug]", got)
+	}
+}

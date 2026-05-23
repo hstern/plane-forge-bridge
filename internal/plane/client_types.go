@@ -69,6 +69,34 @@ type statesListResponse struct {
 	Results []State `json:"results"`
 }
 
+// Label is a Plane project label. Plane's LabelSerializer carries more
+// fields (parent, sort_order, external_*); we keep the surface narrow to
+// what the bridge actually uses on the issue create/update path.
+type Label struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Color       string `json:"color,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// CreateLabelRequest is the body for POST
+// /workspaces/{slug}/projects/{pid}/labels/. Only Name is required; Color
+// and Description are omitempty so the JSON has no nulls (Plane treats
+// nulls differently from absent for some fields, mirroring our
+// CreateIssueRequest stance).
+type CreateLabelRequest struct {
+	Name        string `json:"name"`
+	Color       string `json:"color,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// labelsListResponse is the paginated response shape returned by Plane's
+// label list endpoint. Like states it uses BasePaginator, so we read only
+// the rows under "results".
+type labelsListResponse struct {
+	Results []Label `json:"results"`
+}
+
 // ErrNotFound is returned by GetIssueByExternalRef when no work item matches
 // the (source, externalID) pair. This is the normal "not yet mirrored" case
 // and callers should treat it as a signal to create, not as a failure.
