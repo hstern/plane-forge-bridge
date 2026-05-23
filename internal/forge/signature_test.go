@@ -93,8 +93,8 @@ func TestVerifySignature_NearMiss(t *testing.T) {
 	// Flip the last hex nibble. This still parses as hex, so we exercise the
 	// hmac.Equal branch rather than the hex.DecodeString branch.
 	var nearMiss string
-	switch last := good[len(good)-1]; {
-	case last == '0':
+	switch good[len(good)-1] {
+	case '0':
 		nearMiss = good[:len(good)-1] + "1"
 	default:
 		nearMiss = good[:len(good)-1] + "0"

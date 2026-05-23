@@ -1,0 +1,377 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # build-image + publish push to ghcr; declared at workflow level so both
+  # jobs inherit. lint + e2e jobs only read and don't need this.
+  packages: write
+
+jobs:
+  # Multi-stage Docker build. The Dockerfile's `test` stage runs
+  # `go vet`, `go test -race`, and `govulncheck` against the source the
+  # runtime binary is built from. If tests fail there, the image is never
+  # pushed, so e2e-docker / publish (which consume this image) never run.
+  # The "publish what we tested" property is enforced by the build pipeline
+  # itself, not by job-level dependencies.
+  build-image:
+    name: build-image
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.refs.outputs.image }}
+      stub_image: ${{ steps.refs.outputs.stub_image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image refs
+        id: refs
+        run: |
+          # Docker refs must be lowercase; GH allows mixed-case repo names.
+          owner_repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${owner_repo}:ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "stub_image=ghcr.io/${owner_repo}/plane-stub:ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      # Test stage runs on the build platform (single arch) so go test -race
+      # runs natively, not under qemu. Cache shared with the runtime build
+      # below so the source-layer build is reused.
+      - name: Test (Dockerfile `test` stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build + push multi-arch runtime
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.refs.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # plane-stub is the recording stub used by the e2e job. Build it once
+      # here so the e2e matrix legs share the same artifact, and so the
+      # registry-served image works under `services:` blocks if we ever
+      # promote the stub to a service container.
+      - name: Build + push plane-stub image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: test/e2e-docker/plane-stub/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.refs.outputs.stub_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  lint:
+    name: lint
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.1
+
+  # End-to-end smoke. Brings up a forge service container (Forgejo or Gitea —
+  # matrixed because they share the same v1 webhook contract), launches the
+  # bridge from the build-image artifact as a host process, and asserts the
+  # webhook surface works: HMAC-verified events return 202, bad sigs return
+  # 401, healthz returns 200. The recorded-outbound-call assertion against
+  # plane-stub lands when step 6 (translation) does — the harness is in
+  # place to make that a small follow-up.
+  e2e-docker:
+    name: e2e-docker (${{ matrix.forge.name }})
+    needs: build-image
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        forge:
+          - name: forgejo
+            image: codeberg.org/forgejo/forgejo:15
+          - name: gitea
+            image: gitea/gitea:1.22
+    services:
+      forge:
+        image: ${{ matrix.forge.image }}
+        ports:
+          - 3000:3000
+        env:
+          # Skip the install wizard so the container starts ready.
+          FORGEJO__security__INSTALL_LOCK: "true"
+          FORGEJO__server__ROOT_URL: "http://localhost:3000/"
+          FORGEJO__server__HTTP_PORT: "3000"
+          FORGEJO__server__DOMAIN: "localhost"
+          GITEA__security__INSTALL_LOCK: "true"
+          GITEA__server__ROOT_URL: "http://localhost:3000/"
+          GITEA__server__HTTP_PORT: "3000"
+          GITEA__server__DOMAIN: "localhost"
+    env:
+      FORGE_URL: http://localhost:3000
+      PFB_FORGE_TOKEN: ci-forge-token-${{ github.run_id }}
+      PFB_FORGE_WEBHOOK_SECRET: ci-forge-secret-${{ github.run_id }}
+      PFB_PLANE_API_KEY: ci-plane-key-${{ github.run_id }}
+      PFB_PLANE_WEBHOOK_SECRET: ci-plane-secret-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull the bridge image build-image just pushed and extract its binary.
+      # Run as a host process: the e2e harness reads the bridge's stdout and
+      # the bridge needs to listen on a port the runner can reach. Wrapping
+      # it in `docker run` would just add bind-mounts.
+      - name: Pull built image and extract bridge binary
+        run: |
+          set -euo pipefail
+          image='${{ needs.build-image.outputs.image }}'
+          echo "consuming image: $image"
+          docker pull "$image"
+          cid=$(docker create "$image")
+          docker cp "$cid:/plane-forge-bridge" ./plane-forge-bridge
+          docker rm "$cid" >/dev/null
+          chmod +x ./plane-forge-bridge
+
+      - name: Start plane-stub
+        run: |
+          set -euo pipefail
+          docker pull '${{ needs.build-image.outputs.stub_image }}'
+          docker run -d --name plane-stub -p 8081:8080 \
+            '${{ needs.build-image.outputs.stub_image }}'
+          # Wait for healthz.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8081/_/healthz >/dev/null 2>&1; then
+              echo "plane-stub healthy after ${i}s"; break
+            fi
+            sleep 1
+          done
+
+      - name: Write bridge config
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > config.yaml <<'YAML'
+          listen: "127.0.0.1:8080"
+          log_level: debug
+          forge:
+            base_url: http://localhost:3000
+            token_env: PFB_FORGE_TOKEN
+            webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+          plane:
+            base_url: http://localhost:8081/api/v1
+            workspace_slug: ci
+            api_key_env: PFB_PLANE_API_KEY
+            webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+          bridge_bot:
+            forge_username: pfb-bot
+            plane_member_id: 00000000-0000-0000-0000-000000000000
+          links: []
+          users: {}
+          YAML
+
+      - name: Launch bridge
+        run: |
+          set -euo pipefail
+          ./plane-forge-bridge --config "$PWD/config.yaml" \
+            > bridge.stdout 2> bridge.log &
+          echo $! > bridge.pid
+          # Wait for the bridge to bind.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "bridge healthy after ${i}s"; break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/healthz
+
+      - name: Smoke — verify webhook accepts a valid signature
+        env:
+          FORGE_SECRET: ${{ env.PFB_FORGE_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          body=$(cat internal/forge/testdata/issues_opened.json)
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$FORGE_SECRET" -hex | awk '{print $NF}')
+          status=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X POST http://127.0.0.1:8080/forge/webhook \
+            -H "X-Gitea-Signature: $sig" \
+            -H "X-Gitea-Event: issues" \
+            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-valid" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$body")
+          echo "status=$status body=$(cat /tmp/resp)"
+          if [ "$status" != "202" ]; then
+            echo "ERROR: expected 202 Accepted, got $status"; exit 1
+          fi
+
+      - name: Smoke — verify webhook rejects an invalid signature
+        run: |
+          set -euo pipefail
+          body=$(cat internal/forge/testdata/issues_opened.json)
+          status=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X POST http://127.0.0.1:8080/forge/webhook \
+            -H 'X-Gitea-Signature: deadbeef' \
+            -H 'X-Gitea-Event: issues' \
+            -H "X-Gitea-Delivery: ci-${{ github.run_id }}-invalid" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$body")
+          echo "status=$status body=$(cat /tmp/resp)"
+          if [ "$status" != "401" ]; then
+            echo "ERROR: expected 401 Unauthorized, got $status"; exit 1
+          fi
+
+      - name: Smoke — verify plane-stub recorded no calls yet
+        # Until step 6 wires translation, the bridge should not POST to plane.
+        # When translation lands, expand this step to: create issue in forge
+        # via REST → wait for webhook → query /_/recorded → assert one POST.
+        run: |
+          set -euo pipefail
+          recorded=$(curl -sS http://localhost:8081/_/recorded | jq 'length')
+          echo "plane-stub recorded $recorded call(s)"
+          if [ "$recorded" -ne 0 ]; then
+            echo "ERROR: bridge made unexpected outbound calls before translation lands"
+            curl -sS http://localhost:8081/_/recorded | jq .
+            exit 1
+          fi
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          echo "===== bridge.log ====="; cat bridge.log || true
+          echo "===== bridge.stdout ====="; cat bridge.stdout || true
+          echo "===== plane-stub container log ====="; docker logs plane-stub 2>&1 | tail -200 || true
+          echo "===== forge container log ====="
+          cid=$(docker ps --filter "ancestor=${{ matrix.forge.image }}" -q | head -n1)
+          [ -n "$cid" ] && docker logs "$cid" 2>&1 | tail -200 || echo "(no forge container)"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-docker-${{ matrix.forge.name }}-logs
+          path: |
+            bridge.log
+            bridge.stdout
+            config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          if [ -f bridge.pid ]; then
+            kill "$(cat bridge.pid)" 2>/dev/null
+            sleep 2
+            kill -9 "$(cat bridge.pid)" 2>/dev/null
+          fi
+          docker rm -f plane-stub 2>/dev/null
+
+  # Publish on push to main (rolling `:latest`) and on v* tag pushes (semver
+  # tags). Never on PRs. Retag the build-image artifact rather than rebuild —
+  # the bytes we publish are the bytes e2e-docker just validated.
+  publish:
+    name: publish
+    needs: [lint, build-image, e2e-docker]
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.e2e-docker.result == 'success' &&
+      needs.lint.result == 'success'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need full tag history so the "highest semver" step can compare
+          # the pushed ref against every prior release tag.
+          fetch-depth: 0
+
+      # Guard floating `{{major}}` and `{{major}}.{{minor}}` tags against
+      # backport pushes. We only emit those when the pushed tag is the
+      # highest semver in the repo; backport publishes still get the exact
+      # `:0.1.5` and `:<sha>` tags but leave the floating tags pinned.
+      - name: Is this the highest semver tag?
+        id: highest
+        run: |
+          set -euo pipefail
+          latest=$(git tag -l 'v*' | sort -V | tail -n1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" = "$latest" ]; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.highest.outputs.yes == 'true' }}
+            type=semver,pattern={{major}},enable=${{ steps.highest.outputs.yes == 'true' }}
+            type=sha
+
+      - name: Retag build-image with release tags
+        env:
+          SRC: ${{ needs.build-image.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          echo "retagging $SRC →"
+          printf '  %s\n' "${args[@]}"
+          docker buildx imagetools create "${args[@]}" "$SRC"

@@ -8,25 +8,6 @@ import (
 	"testing"
 )
 
-const validConfig = `
-listen: "127.0.0.1:0"
-log_level: info
-forge:
-  base_url: https://git.example.org
-  token_env: TEST_FORGE_TOKEN
-  webhook_secret_env: TEST_FORGE_WEBHOOK_SECRET
-plane:
-  base_url: https://app.example.org/api/v1
-  workspace_slug: example
-  api_key_env: TEST_PLANE_API_KEY
-  webhook_secret_env: TEST_PLANE_WEBHOOK_SECRET
-bridge_bot:
-  forge_username: bridge-bot
-  plane_member_id: 00000000-0000-0000-0000-000000000000
-links: []
-users: {}
-`
-
 func TestVersionFlag(t *testing.T) {
 	stdout, stderr := pipePair(t)
 	defer stdout.Close()

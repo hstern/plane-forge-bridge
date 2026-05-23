@@ -41,12 +41,15 @@ linters:
       require-specific: true
   exclusions:
     rules:
-      # Tests get a bit more rope: unchecked errors and gosec false positives
-      # (G404 random, hardcoded creds in fixtures, etc.) are common and noisy.
+      # Tests get a bit more rope: unchecked errors, gosec false positives
+      # (G404 random, hardcoded creds in fixtures), and noctx complaints
+      # about httptest.NewRequest / client.Get — none of which exercise real
+      # network paths.
       - path: _test\.go
         linters:
           - errcheck
           - gosec
+          - noctx
 
 formatters:
   enable:

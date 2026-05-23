@@ -38,7 +38,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		return err
 	}
 	if *printVersion {
-		fmt.Fprintln(stdout, version)
+		_, _ = fmt.Fprintln(stdout, version)
 		return nil
 	}
 
@@ -80,4 +80,3 @@ func newLogger(level string, w *os.File) *slog.Logger {
 	}
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl}))
 }
-

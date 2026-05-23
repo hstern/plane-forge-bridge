@@ -272,7 +272,7 @@ func handleReset(rec *recorder) http.HandlerFunc {
 
 // handleHealthz responds 200 OK with body "ok".
 func handleHealthz() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
@@ -302,6 +302,13 @@ func resolveListen(flagVal, envVal string) string {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -334,18 +341,14 @@ func main() {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	case err := <-errCh:
-		if err != nil {
-			logger.Error("server error", "err", err.Error())
-			os.Exit(1)
-		}
-		return
+		return err
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown", "err", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("shutdown: %w", err)
 	}
 	logger.Info("shutdown complete")
+	return nil
 }

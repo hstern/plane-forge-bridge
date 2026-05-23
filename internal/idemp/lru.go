@@ -31,14 +31,14 @@ func (k lruKey) string() string {
 	return string(k.src) + "|" + k.eventID + "|" + k.targetObjID
 }
 
-// NewLRU returns an LRU with at most cap entries. Older entries are evicted
-// on insert. A non-positive cap is clamped to 1.
-func NewLRU(cap int) *LRU {
-	if cap < 1 {
-		cap = 1
+// NewLRU returns an LRU with at most capacity entries. Older entries are
+// evicted on insert. A non-positive capacity is clamped to 1.
+func NewLRU(capacity int) *LRU {
+	if capacity < 1 {
+		capacity = 1
 	}
 	return &LRU{
-		cap: cap,
+		cap: capacity,
 		ll:  list.New(),
 		idx: make(map[string]*list.Element),
 	}
@@ -80,7 +80,11 @@ func (l *LRU) Record(src Source, eventID, targetObjID string) bool {
 			break
 		}
 		l.ll.Remove(oldest)
-		delete(l.idx, oldest.Value.(lruKey).string())
+		// All values added via Record carry an lruKey; the assertion can only
+		// fail if something else mutated the list, which nothing else does.
+		if k, isKey := oldest.Value.(lruKey); isKey {
+			delete(l.idx, k.string())
+		}
 	}
 	return true
 }

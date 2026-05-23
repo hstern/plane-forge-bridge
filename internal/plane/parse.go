@@ -33,7 +33,7 @@ func Parse(headers http.Header, body []byte) (*Event, error) {
 
 	var env envelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMalformedPayload, err)
+		return nil, fmt.Errorf("%w: %w", ErrMalformedPayload, err)
 	}
 
 	// The header should match the envelope; trust the header (it is set by
@@ -131,7 +131,7 @@ func decodeWorkItem(raw json.RawMessage) (*WorkItem, error) {
 	}
 	var wi WorkItem
 	if err := json.Unmarshal(raw, &wi); err != nil {
-		return nil, fmt.Errorf("%w: work item: %v", ErrMalformedPayload, err)
+		return nil, fmt.Errorf("%w: work item: %w", ErrMalformedPayload, err)
 	}
 	return &wi, nil
 }
@@ -142,7 +142,7 @@ func decodeComment(raw json.RawMessage) (*Comment, error) {
 	}
 	var c Comment
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, fmt.Errorf("%w: comment: %v", ErrMalformedPayload, err)
+		return nil, fmt.Errorf("%w: comment: %w", ErrMalformedPayload, err)
 	}
 	return &c, nil
 }

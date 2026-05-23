@@ -7,6 +7,8 @@ import "errors"
 // the webhook envelope.
 type EventKind string
 
+// EventKind constants enumerate the Plane webhook events this package
+// surfaces. The string form is "<plane-event>.<plane-action>".
 const (
 	EventWorkItemCreated EventKind = "work_item.created"
 	EventWorkItemUpdated EventKind = "work_item.updated"

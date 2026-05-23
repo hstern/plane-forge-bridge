@@ -52,7 +52,7 @@ func VerifyAndParse(secret string, headers http.Header, body []byte) (*Event, er
 // forward compatibility.
 func decodePayload(body []byte, v any) error {
 	if err := json.Unmarshal(body, v); err != nil {
-		return fmt.Errorf("%w: %v", ErrMalformedPayload, err)
+		return fmt.Errorf("%w: %w", ErrMalformedPayload, err)
 	}
 	return nil
 }

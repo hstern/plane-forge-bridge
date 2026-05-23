@@ -45,9 +45,9 @@ func Load(path string) (*Resolved, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", ErrConfigMissing, path)
 		}
-		return nil, fmt.Errorf("%w: %s: %v", ErrConfigMissing, path, err)
+		return nil, fmt.Errorf("%w: %s: %w", ErrConfigMissing, path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return LoadFromReader(f, os.Getenv)
 }
 
@@ -62,14 +62,14 @@ func LoadFromReader(r io.Reader, envLookup func(string) string) (*Resolved, erro
 
 	raw, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read: %v", ErrConfigMalformed, err)
+		return nil, fmt.Errorf("%w: read: %w", ErrConfigMalformed, err)
 	}
 
 	var cfg Config
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: %v", ErrConfigMalformed, err)
+		return nil, fmt.Errorf("%w: %w", ErrConfigMalformed, err)
 	}
 
 	applyEnvOverrides(&cfg, envLookup)
@@ -106,7 +106,7 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("%w: listen is required", ErrConfigInvalid)
 	}
 	if err := validateListen(cfg.Listen); err != nil {
-		return fmt.Errorf("%w: listen %q: %v", ErrConfigInvalid, cfg.Listen, err)
+		return fmt.Errorf("%w: listen %q: %w", ErrConfigInvalid, cfg.Listen, err)
 	}
 
 	if cfg.LogLevel == "" {
@@ -117,7 +117,7 @@ func validate(cfg *Config) error {
 	}
 
 	if err := validateAbsURL(cfg.Forge.BaseURL); err != nil {
-		return fmt.Errorf("%w: forge.base_url %q: %v", ErrConfigInvalid, cfg.Forge.BaseURL, err)
+		return fmt.Errorf("%w: forge.base_url %q: %w", ErrConfigInvalid, cfg.Forge.BaseURL, err)
 	}
 	if cfg.Forge.TokenEnv == "" {
 		return fmt.Errorf("%w: forge.token_env is required", ErrConfigInvalid)
@@ -127,7 +127,7 @@ func validate(cfg *Config) error {
 	}
 
 	if err := validateAbsURL(cfg.Plane.BaseURL); err != nil {
-		return fmt.Errorf("%w: plane.base_url %q: %v", ErrConfigInvalid, cfg.Plane.BaseURL, err)
+		return fmt.Errorf("%w: plane.base_url %q: %w", ErrConfigInvalid, cfg.Plane.BaseURL, err)
 	}
 	if cfg.Plane.WorkspaceSlug == "" {
 		return fmt.Errorf("%w: plane.workspace_slug is required", ErrConfigInvalid)
@@ -185,7 +185,7 @@ func validateListen(addr string) error {
 	}
 	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
-		return fmt.Errorf("port %q: %v", port, err)
+		return fmt.Errorf("port %q: %w", port, err)
 	}
 	if n == 0 {
 		return errors.New("port 0 is not allowed")

@@ -16,8 +16,9 @@ config.yml
 .env.*
 !.env.example
 
-# Editor
+# Editor / agent state
 .idea/
 .vscode/
+.claude/
 *.swp
 .DS_Store

@@ -13,6 +13,8 @@ import (
 // Source identifies which side originated a change.
 type Source string
 
+// The Source constants name the two sides of the bridge as they appear in
+// the loop-break marker's src= field.
 const (
 	SourceForge Source = "forge"
 	SourcePlane Source = "plane"
