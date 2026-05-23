@@ -14,7 +14,11 @@
 
 ARG VERSION=dev
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+# Debian base (not alpine) because the `test` stage below runs
+# `go test -race`, which requires cgo + a C toolchain. The runtime
+# stage is still distroless/static, so the alpine size advantage in
+# the builder buys nothing.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG VERSION
 WORKDIR /src
 

@@ -5,7 +5,7 @@
 #
 #   docker build -f test/e2e-docker/plane-stub/Dockerfile -t plane-stub .
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
