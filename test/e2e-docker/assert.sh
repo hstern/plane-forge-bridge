@@ -75,6 +75,26 @@ if [ -z "$name" ]; then
 fi
 log "issue title carried through: name=$name"
 
+# Optional: assert that the create POST carries plane label UUIDs and that
+# at least one POST to /labels/ happened (the bridge's auto-create path).
+if [ "${ASSERT_LABELS:-0}" = "1" ]; then
+  labels_len=$(printf '%s' "$found_json" | jq -r '.body.labels | length // 0')
+  if [ "$labels_len" -lt 1 ]; then
+    log "ERROR: recorded create has no labels"
+    printf '%s\n' "$found_json" | jq . >&2
+    exit 1
+  fi
+  log "issue create carried ${labels_len} label UUID(s)"
+
+  label_creates=$(curl -fsS "$PLANE_STUB_URL/_/recorded" |
+    jq '[.[] | select(.method == "POST" and (.path | test("/labels/?$")))] | length')
+  if [ "$label_creates" -lt 1 ]; then
+    log "ERROR: no POSTs to /labels/ recorded (auto-create path didn't fire)"
+    exit 1
+  fi
+  log "auto-create path fired (${label_creates} POSTs to /labels/)"
+fi
+
 # Optional: assert that a comment translation was also recorded.
 if [ "${ASSERT_COMMENT:-0}" = "1" ]; then
   log "polling for the bridge's forge→plane comment create"

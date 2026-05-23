@@ -343,6 +343,22 @@ jobs:
           done
           echo "FORGE_TOKEN=$token" >> "$GITHUB_ENV"
 
+      - name: Create a forge label for the e2e issue
+        id: label
+        run: |
+          set -euo pipefail
+          http_code=$(curl -sS -o /tmp/label.json -w '%{http_code}' \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d '{"name":"e2e-bug","color":"#ff0000","description":"created by CI to exercise label propagation"}' \
+            "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/labels")
+          echo "POST /labels status=$http_code"
+          cat /tmp/label.json | head -c 1000; echo
+          [ "$http_code" = "201" ] || { echo "ERROR: label create returned $http_code"; exit 1; }
+          label_id=$(jq -r .id /tmp/label.json)
+          echo "id=$label_id" >> "$GITHUB_OUTPUT"
+
       - name: Create an issue via forge REST API
         id: issue
         run: |
@@ -352,7 +368,7 @@ jobs:
             -H "Authorization: token $FORGE_TOKEN" \
             -H 'Content-Type: application/json' \
             -X POST \
-            -d '{"title":"e2e: hello from CI","body":"This issue triggers the forge→plane translator."}' \
+            -d "{\"title\":\"e2e: hello from CI\",\"body\":\"This issue triggers the forge→plane translator.\",\"labels\":[${{ steps.label.outputs.id }}]}" \
             "$FORGE_URL/api/v1/repos/$FORGE_ORG/$FORGE_REPO/issues")
           echo "POST /issues status=$http_code"
           cat /tmp/issue.json | head -c 2000; echo
@@ -383,12 +399,13 @@ jobs:
           cat /tmp/comment.json | head -c 2000; echo
           [ "$http_code" = "201" ] || { echo "ERROR: comment create returned $http_code"; exit 1; }
 
-      - name: Assert plane-stub recorded the issue + comment translations
+      - name: Assert plane-stub recorded the issue + label + comment translations
         env:
           PLANE_STUB_URL: http://localhost:8081
           FORGE_ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           ISSUE_WAIT_SEC: 60
           ASSERT_COMMENT: "1"
+          ASSERT_LABELS: "1"
         run: |
           set -euo pipefail
           chmod +x test/e2e-docker/assert.sh

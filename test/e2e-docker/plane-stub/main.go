@@ -175,11 +175,29 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 			return
 		}
 
-		// GETs are lookups. The only one the bridge uses today is
-		// GetIssueByExternalRef, which is the issue-list endpoint with
-		// ?external_source=X&external_id=Y query params. Serve any work
-		// item we remember from a prior POST; otherwise 404.
+		// GET dispatch:
+		//   - /labels  → return the recorded labels for this project as a
+		//                paginated envelope (empty initially)
+		//   - /states  → return an empty paginated envelope (the bridge only
+		//                reads states when state_map is non-empty; e2e
+		//                deliberately leaves state_map empty so this is just
+		//                a safety net)
+		//   - /issues  → external-ref lookup as before
 		if r.Method == http.MethodGet {
+			switch {
+			case isLabelsCollection(r.URL.Path):
+				writeJSON(w, http.StatusOK, map[string]any{
+					"results":     store.listLabels(projectIDFromPath(r.URL.Path)),
+					"total_count": len(store.listLabels(projectIDFromPath(r.URL.Path))),
+				}, logger)
+				return
+			case isStatesCollection(r.URL.Path):
+				writeJSON(w, http.StatusOK, map[string]any{
+					"results":     []any{},
+					"total_count": 0,
+				}, logger)
+				return
+			}
 			src := r.URL.Query().Get("external_source")
 			ext := r.URL.Query().Get("external_id")
 			if src != "" && ext != "" {
@@ -207,6 +225,27 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 		resp := map[string]any{
 			"id":      id,
 			"project": projectIDFromPath(r.URL.Path),
+		}
+
+		// POST on /labels — mint a label, record it under the project so
+		// subsequent ListProjectLabels finds it, and return the bare
+		// object.
+		if r.Method == http.MethodPost && isLabelsCollection(r.URL.Path) {
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			label := map[string]any{
+				"id":   id,
+				"name": parsed["name"],
+			}
+			if v, ok := parsed["color"]; ok {
+				label["color"] = v
+			}
+			if v, ok := parsed["description"]; ok {
+				label["description"] = v
+			}
+			store.addLabel(projectIDFromPath(r.URL.Path), label)
+			writeJSON(w, http.StatusOK, label, logger)
+			return
 		}
 
 		// On POST (create) and PATCH (update), echo title/state/external_*
@@ -243,15 +282,21 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 	}
 }
 
-// workItemStore is a tiny in-memory index of (external_source, external_id)
-// → work item JSON. Populated on POST, queried on GET. Concurrency-safe.
+// workItemStore is the stub's tiny in-memory state. It tracks work items
+// indexed by (external_source, external_id) — populated on POST,
+// queried by GetIssueByExternalRef — and labels per project — populated
+// by POST /labels, queried by ListProjectLabels. Concurrency-safe.
 type workItemStore struct {
-	mu    sync.Mutex
-	items map[string]map[string]any
+	mu     sync.Mutex
+	items  map[string]map[string]any
+	labels map[string][]map[string]any // projectID → labels
 }
 
 func newWorkItemStore() *workItemStore {
-	return &workItemStore{items: make(map[string]map[string]any)}
+	return &workItemStore{
+		items:  make(map[string]map[string]any),
+		labels: make(map[string][]map[string]any),
+	}
 }
 
 func (s *workItemStore) key(src, ext string) string { return src + "|" + ext }
@@ -259,7 +304,6 @@ func (s *workItemStore) key(src, ext string) string { return src + "|" + ext }
 func (s *workItemStore) put(src, ext string, item map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Defensive copy so subsequent map mutations elsewhere don't leak in.
 	cp := make(map[string]any, len(item))
 	for k, v := range item {
 		cp[k] = v
@@ -281,10 +325,36 @@ func (s *workItemStore) get(src, ext string) (map[string]any, bool) {
 	return cp, true
 }
 
+func (s *workItemStore) addLabel(projectID string, label map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make(map[string]any, len(label))
+	for k, v := range label {
+		cp[k] = v
+	}
+	s.labels[projectID] = append(s.labels[projectID], cp)
+}
+
+func (s *workItemStore) listLabels(projectID string) []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.labels[projectID]
+	out := make([]map[string]any, len(src))
+	for i, l := range src {
+		cp := make(map[string]any, len(l))
+		for k, v := range l {
+			cp[k] = v
+		}
+		out[i] = cp
+	}
+	return out
+}
+
 func (s *workItemStore) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items = make(map[string]map[string]any)
+	s.labels = make(map[string][]map[string]any)
 }
 
 // isKnownAPIPath returns true if path matches one of the Plane endpoints
@@ -299,26 +369,45 @@ func isKnownAPIPath(path string) bool {
 	// /api/v1/workspaces/{slug}/projects/{pid}/issues/{iid}       (PATCH)
 	// /api/v1/workspaces/{slug}/projects/{pid}/issues/{iid}/comments        (POST)
 	// /api/v1/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}  (PATCH)
+	// /api/v1/workspaces/{slug}/projects/{pid}/labels             (GET, POST)
+	// /api/v1/workspaces/{slug}/projects/{pid}/states             (GET)
 	//
 	// After splitting on "/", a leading "" appears at index 0:
-	// ["", "api", "v1", "workspaces", "{slug}", "projects", "{pid}", "issues", ...]
+	// ["", "api", "v1", "workspaces", "{slug}", "projects", "{pid}", "issues"|"labels"|"states", ...]
 	if len(parts) < 8 {
 		return false
 	}
-	if parts[1] != "api" || parts[2] != "v1" || parts[3] != "workspaces" || parts[5] != "projects" || parts[7] != "issues" {
+	if parts[1] != "api" || parts[2] != "v1" || parts[3] != "workspaces" || parts[5] != "projects" {
 		return false
 	}
-	switch len(parts) {
-	case 8: // .../issues
-		return true
-	case 9: // .../issues/{iid}
-		return true
-	case 10: // .../issues/{iid}/comments
-		return parts[9] == "comments"
-	case 11: // .../issues/{iid}/comments/{cid}
-		return parts[9] == "comments"
+	switch parts[7] {
+	case "issues":
+		switch len(parts) {
+		case 8, 9:
+			return true
+		case 10, 11:
+			return parts[9] == "comments"
+		}
+	case "labels", "states":
+		// .../labels or .../labels/{lid} — accept both shapes
+		return len(parts) == 8 || len(parts) == 9
 	}
 	return false
+}
+
+// isLabelsCollection reports whether path is the collection endpoint
+// .../projects/{pid}/labels (no label-ID suffix).
+func isLabelsCollection(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	parts := strings.Split(p, "/")
+	return len(parts) == 8 && parts[7] == "labels"
+}
+
+// isStatesCollection reports whether path is the .../states endpoint.
+func isStatesCollection(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	parts := strings.Split(p, "/")
+	return len(parts) == 8 && parts[7] == "states"
 }
 
 // handleRecorded serves the recorded call log as JSON.

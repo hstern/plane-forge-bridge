@@ -36,16 +36,16 @@ type fakeClient struct {
 	UpdateCommentFunc         func(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteCommentFunc         func(ctx context.Context, projectID, issueID, commentID string) error
 
-	Gets                     []getCall
-	GetsByID                 []getByIDCall
-	Creates                  []createCall
-	Updates                  []updateCall
-	Lists                    []string
-	ListProjectLabelsCalls   []string
-	CreateProjectLabelCalls  []labelCreateCall
-	CommentCreates           []commentCreateCall
-	CommentUpdates           []commentUpdateCall
-	CommentDeletes           []commentDeleteCall
+	Gets                    []getCall
+	GetsByID                []getByIDCall
+	Creates                 []createCall
+	Updates                 []updateCall
+	Lists                   []string
+	ListProjectLabelsCalls  []string
+	CreateProjectLabelCalls []labelCreateCall
+	CommentCreates          []commentCreateCall
+	CommentUpdates          []commentUpdateCall
+	CommentDeletes          []commentDeleteCall
 }
 
 type labelCreateCall struct {
@@ -263,12 +263,12 @@ type fakeForgeClient struct {
 	UpdateCommentFunc   func(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
 	DeleteCommentFunc   func(ctx context.Context, owner, repo string, commentID int64) error
 
-	IssueGets         []forgeGetIssueCall
-	LabelLists        []forgeLabelListCall
-	LabelCreates      []forgeLabelCreateCall
-	CommentCreates    []forgeCommentCreateCall
-	CommentUpdates    []forgeCommentUpdateCall
-	CommentDeletes    []forgeCommentDeleteCall
+	IssueGets      []forgeGetIssueCall
+	LabelLists     []forgeLabelListCall
+	LabelCreates   []forgeLabelCreateCall
+	CommentCreates []forgeCommentCreateCall
+	CommentUpdates []forgeCommentUpdateCall
+	CommentDeletes []forgeCommentDeleteCall
 }
 
 type forgeLabelListCall struct {
