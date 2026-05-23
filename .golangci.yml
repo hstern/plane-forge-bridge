@@ -1,0 +1,54 @@
+# golangci-lint v2 schema. Modeled on hstern/fj-bellows.
+version: "2"
+
+run:
+  concurrency: 4
+  timeout: 5m
+  tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 50
+
+linters:
+  enable:
+    # correctness
+    - govet
+    - staticcheck
+    - unused
+    - errcheck
+    - errorlint
+    - ineffassign
+    # style
+    - revive
+    - gocritic
+    - misspell
+    - nolintlint
+    # security & resources
+    - gosec
+    - bodyclose
+    - noctx
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        # G304: file inclusion via variable. We deliberately read user-provided
+        # config paths (--config flag); the path is the operator's input.
+        - G304
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      # Tests get a bit more rope: unchecked errors and gosec false positives
+      # (G404 random, hardcoded creds in fixtures, etc.) are common and noisy.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

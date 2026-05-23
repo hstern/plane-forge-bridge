@@ -1,0 +1,32 @@
+# VCS + IDE + CI clutter (none of this is needed inside the build context).
+.git
+.gitignore
+.github
+.gitea
+.forgejo
+.idea
+.vscode
+.claude
+
+# Build artifacts.
+bin/
+dist/
+out/
+
+# Test artifacts.
+*.test
+coverage.*
+
+# Local config — keep the example, drop the real one.
+config.yaml
+
+# OS junk.
+.DS_Store
+Thumbs.db
+
+# Docker bookkeeping.
+Dockerfile.*
+!Dockerfile
+
+# The image itself doesn't need its own .dockerignore.
+.dockerignore
