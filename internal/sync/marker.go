@@ -30,16 +30,9 @@ import (
 func RenderDescription(forgeBody, senderLogin, senderHTMLURL, repoFullName, deliveryID string, mapped bool) string {
 	var b strings.Builder
 	if !mapped {
-		// Markdown blockquote. Use the sender's HTML URL so the link target is
-		// the forge profile page, and include the repo so it's obvious which
-		// link the bridge is mirroring.
-		b.WriteString("> Originally posted by `")
-		b.WriteString(senderLogin)
-		b.WriteString("` on [")
-		b.WriteString(repoFullName)
-		b.WriteString("](")
-		b.WriteString(senderHTMLURL)
-		b.WriteString(")\n>\n\n")
+		// Markdown blockquote. Shared with RenderComment via
+		// unmappedAuthorPreface so the format only lives in one place.
+		b.WriteString(unmappedAuthorPreface(senderLogin, senderHTMLURL, repoFullName))
 	}
 	b.WriteString(forgeBody)
 	return idemp.Wrap(b.String(), idemp.SourceForge, deliveryID)

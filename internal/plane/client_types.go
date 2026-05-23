@@ -31,6 +31,29 @@ type UpdateIssueRequest struct {
 	Labels          []string `json:"labels,omitempty"`
 }
 
+// CreateCommentRequest is the body for POST
+// /workspaces/{slug}/projects/{pid}/issues/{iid}/comments/. Access is
+// omitempty because Plane defaults to "EXTERNAL" when absent.
+type CreateCommentRequest struct {
+	CommentHTML string `json:"comment_html"`
+	Access      string `json:"access,omitempty"` // "INTERNAL" or "EXTERNAL"; Plane defaults to EXTERNAL
+}
+
+// UpdateCommentRequest is the body for PATCH
+// .../issues/{iid}/comments/{cid}/. The single pointer field lets the
+// caller patch comment_html without sending it as an explicit null.
+type UpdateCommentRequest struct {
+	CommentHTML *string `json:"comment_html,omitempty"`
+}
+
+// CommentResponse is the shape Plane returns from the comment endpoints.
+// It's an alias for the inbound webhook Comment type: Plane's
+// IssueCommentSerializer is the same serializer used for both the webhook
+// payload and the REST response, so the field layout matches. Keeping
+// them as a single type avoids drift while still letting the public REST
+// surface read CommentResponse.
+type CommentResponse = Comment
+
 // State is a workflow state defined on a Plane project.
 type State struct {
 	ID    string `json:"id"`

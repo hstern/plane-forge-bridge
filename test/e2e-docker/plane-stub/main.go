@@ -159,16 +159,14 @@ func projectIDFromPath(path string) string {
 	return rest
 }
 
-// handleAPI handles every request under /api/v1/... It records the request
-// and returns a minimal JSON body with a fresh UUID. Unknown paths get a
-// 404 but are still recorded.
-func handleAPI(rec *recorder, logger *slog.Logger) http.HandlerFunc {
+// handleAPI handles every request under /api/v1/... It records the request,
+// remembers POSTed work items by external_source+external_id so subsequent
+// lookups find them, and returns a minimal JSON body with a fresh UUID.
+// Unknown paths get a 404 but are still recorded.
+func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := recordRequest(r, rec, logger)
 
-		// We accept the small set of paths the bridge is expected to hit.
-		// Anything else gets a 404 — but we still record it so the asserter
-		// can see that the bridge sent something it shouldn't have.
 		if !isKnownAPIPath(r.URL.Path) {
 			writeJSON(w, http.StatusNotFound, map[string]string{
 				"detail": "not found",
@@ -177,13 +175,19 @@ func handleAPI(rec *recorder, logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		// GETs are treated as lookups. The bridge calls
-		// GetIssueByExternalRef before deciding to create vs update; the
-		// stub answers "not found" so the bridge always takes the create
-		// path. A smarter stub could remember POSTed work items and return
-		// them here, but that adds state for no e2e value — the asserter
-		// reads the recorded calls directly.
+		// GETs are lookups. The only one the bridge uses today is
+		// GetIssueByExternalRef, which is the issue-list endpoint with
+		// ?external_source=X&external_id=Y query params. Serve any work
+		// item we remember from a prior POST; otherwise 404.
 		if r.Method == http.MethodGet {
+			src := r.URL.Query().Get("external_source")
+			ext := r.URL.Query().Get("external_id")
+			if src != "" && ext != "" {
+				if wi, ok := store.get(src, ext); ok {
+					writeJSON(w, http.StatusOK, wi, logger)
+					return
+				}
+			}
 			writeJSON(w, http.StatusNotFound, map[string]string{
 				"detail": "not found",
 				"path":   r.URL.Path,
@@ -205,10 +209,11 @@ func handleAPI(rec *recorder, logger *slog.Logger) http.HandlerFunc {
 			"project": projectIDFromPath(r.URL.Path),
 		}
 
-		// On POSTs (creates) we echo back the title/state fields from the
-		// request body if they were JSON-decodable. PATCH gets the same
-		// treatment for symmetry — the asserter only looks at recorded
-		// requests, but echoing is convenient when debugging by hand.
+		// On POST (create) and PATCH (update), echo title/state/external_*
+		// from the request body if it's JSON. POST also stores the work
+		// item under (external_source, external_id) so future lookups find
+		// it — this mirrors how real Plane behaves on the same endpoint
+		// shape used by GetIssueByExternalRef.
 		if r.Method == http.MethodPost || r.Method == http.MethodPatch {
 			var parsed map[string]any
 			if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {
@@ -218,11 +223,68 @@ func handleAPI(rec *recorder, logger *slog.Logger) http.HandlerFunc {
 				if state, ok := parsed["state"].(string); ok {
 					resp["state"] = state
 				}
+				if src, ok := parsed["external_source"].(string); ok && src != "" {
+					resp["external_source"] = src
+				}
+				if ext, ok := parsed["external_id"].(string); ok && ext != "" {
+					resp["external_id"] = ext
+				}
+			}
+			if r.Method == http.MethodPost {
+				if src, _ := resp["external_source"].(string); src != "" {
+					if ext, _ := resp["external_id"].(string); ext != "" {
+						store.put(src, ext, resp)
+					}
+				}
 			}
 		}
 
 		writeJSON(w, http.StatusOK, resp, logger)
 	}
+}
+
+// workItemStore is a tiny in-memory index of (external_source, external_id)
+// → work item JSON. Populated on POST, queried on GET. Concurrency-safe.
+type workItemStore struct {
+	mu    sync.Mutex
+	items map[string]map[string]any
+}
+
+func newWorkItemStore() *workItemStore {
+	return &workItemStore{items: make(map[string]map[string]any)}
+}
+
+func (s *workItemStore) key(src, ext string) string { return src + "|" + ext }
+
+func (s *workItemStore) put(src, ext string, item map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Defensive copy so subsequent map mutations elsewhere don't leak in.
+	cp := make(map[string]any, len(item))
+	for k, v := range item {
+		cp[k] = v
+	}
+	s.items[s.key(src, ext)] = cp
+}
+
+func (s *workItemStore) get(src, ext string) (map[string]any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wi, ok := s.items[s.key(src, ext)]
+	if !ok {
+		return nil, false
+	}
+	cp := make(map[string]any, len(wi))
+	for k, v := range wi {
+		cp[k] = v
+	}
+	return cp, true
+}
+
+func (s *workItemStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = make(map[string]map[string]any)
 }
 
 // isKnownAPIPath returns true if path matches one of the Plane endpoints
@@ -271,8 +333,9 @@ func handleRecorded(rec *recorder, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// handleReset clears the recorded call log.
-func handleReset(rec *recorder) http.HandlerFunc {
+// handleReset clears both the recorded call log and the in-memory work
+// item store.
+func handleReset(rec *recorder, store *workItemStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -280,6 +343,7 @@ func handleReset(rec *recorder) http.HandlerFunc {
 			return
 		}
 		rec.reset()
+		store.reset()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -293,12 +357,14 @@ func handleHealthz() http.HandlerFunc {
 	}
 }
 
-// newMux wires up the routes against a fresh recorder. Exposed for tests.
+// newMux wires up the routes against a fresh recorder + work item store.
+// Exposed for tests.
 func newMux(rec *recorder, logger *slog.Logger) *http.ServeMux {
+	store := newWorkItemStore()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/", handleAPI(rec, logger))
+	mux.HandleFunc("/api/v1/", handleAPI(rec, store, logger))
 	mux.HandleFunc("/_/recorded", handleRecorded(rec, logger))
-	mux.HandleFunc("/_/reset", handleReset(rec))
+	mux.HandleFunc("/_/reset", handleReset(rec, store))
 	mux.HandleFunc("/_/healthz", handleHealthz())
 	return mux
 }

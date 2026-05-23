@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/hstern/plane-forge-bridge/internal/forge"
 	"github.com/hstern/plane-forge-bridge/internal/plane"
 )
 
@@ -24,15 +25,47 @@ import (
 type fakeClient struct {
 	mu sync.Mutex
 
+	GetIssueFunc              func(ctx context.Context, projectID, issueID string) (*plane.WorkItem, error)
 	GetIssueByExternalRefFunc func(ctx context.Context, projectID, source, externalID string) (*plane.WorkItem, error)
 	CreateIssueFunc           func(ctx context.Context, projectID string, req plane.CreateIssueRequest) (*plane.WorkItem, error)
 	UpdateIssueFunc           func(ctx context.Context, projectID, issueID string, req plane.UpdateIssueRequest) (*plane.WorkItem, error)
 	ListProjectStatesFunc     func(ctx context.Context, projectID string) ([]plane.State, error)
+	CreateCommentFunc         func(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
+	UpdateCommentFunc         func(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
+	DeleteCommentFunc         func(ctx context.Context, projectID, issueID, commentID string) error
 
-	Gets    []getCall
-	Creates []createCall
-	Updates []updateCall
-	Lists   []string
+	Gets           []getCall
+	GetsByID       []getByIDCall
+	Creates        []createCall
+	Updates        []updateCall
+	Lists          []string
+	CommentCreates []commentCreateCall
+	CommentUpdates []commentUpdateCall
+	CommentDeletes []commentDeleteCall
+}
+
+type getByIDCall struct {
+	ProjectID string
+	IssueID   string
+}
+
+type commentCreateCall struct {
+	ProjectID string
+	IssueID   string
+	Req       plane.CreateCommentRequest
+}
+
+type commentUpdateCall struct {
+	ProjectID string
+	IssueID   string
+	CommentID string
+	Req       plane.UpdateCommentRequest
+}
+
+type commentDeleteCall struct {
+	ProjectID string
+	IssueID   string
+	CommentID string
 }
 
 type getCall struct {
@@ -50,6 +83,17 @@ type updateCall struct {
 	ProjectID string
 	IssueID   string
 	Req       plane.UpdateIssueRequest
+}
+
+func (f *fakeClient) GetIssue(ctx context.Context, projectID, issueID string) (*plane.WorkItem, error) {
+	f.mu.Lock()
+	f.GetsByID = append(f.GetsByID, getByIDCall{ProjectID: projectID, IssueID: issueID})
+	fn := f.GetIssueFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, issueID)
+	}
+	return nil, plane.ErrNotFound
 }
 
 func (f *fakeClient) GetIssueByExternalRef(ctx context.Context, projectID, source, externalID string) (*plane.WorkItem, error) {
@@ -112,6 +156,48 @@ func (f *fakeClient) ListProjectStates(ctx context.Context, projectID string) ([
 	}, nil
 }
 
+func (f *fakeClient) CreateComment(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error) {
+	f.mu.Lock()
+	f.CommentCreates = append(f.CommentCreates, commentCreateCall{ProjectID: projectID, IssueID: issueID, Req: req})
+	fn := f.CreateCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, issueID, req)
+	}
+	return &plane.Comment{
+		ID:          "cmt-default",
+		IssueID:     issueID,
+		Project:     projectID,
+		CommentHTML: req.CommentHTML,
+	}, nil
+}
+
+func (f *fakeClient) UpdateComment(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error) {
+	f.mu.Lock()
+	f.CommentUpdates = append(f.CommentUpdates, commentUpdateCall{ProjectID: projectID, IssueID: issueID, CommentID: commentID, Req: req})
+	fn := f.UpdateCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, issueID, commentID, req)
+	}
+	c := &plane.Comment{ID: commentID, IssueID: issueID, Project: projectID}
+	if req.CommentHTML != nil {
+		c.CommentHTML = *req.CommentHTML
+	}
+	return c, nil
+}
+
+func (f *fakeClient) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error {
+	f.mu.Lock()
+	f.CommentDeletes = append(f.CommentDeletes, commentDeleteCall{ProjectID: projectID, IssueID: issueID, CommentID: commentID})
+	fn := f.DeleteCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, projectID, issueID, commentID)
+	}
+	return nil
+}
+
 // snapshot returns copies of the recorded call slices so assertions can read
 // them without racing with concurrent calls in the test.
 func (f *fakeClient) snapshot() (gets []getCall, creates []createCall, updates []updateCall, lists []string) {
@@ -122,4 +208,103 @@ func (f *fakeClient) snapshot() (gets []getCall, creates []createCall, updates [
 	updates = append(updates, f.Updates...)
 	lists = append(lists, f.Lists...)
 	return
+}
+
+// fakeForgeClient is the hand-written test double for ForgeClient.
+// Same shape and conventions as fakeClient — per-method func overrides
+// with default behaviour when nil, and a mutex protecting both the
+// recorded slices and the override fields.
+//
+// Default behaviour when an override is nil:
+//
+//   - GetIssue       → returns (nil, forge.ErrUnsupportedEvent) so tests
+//     that don't supply an override see a clear failure path.
+//   - CreateComment  → returns a *forge.Comment with a generated ID.
+//   - UpdateComment  → echoes the commentID back.
+//   - DeleteComment  → returns nil.
+type fakeForgeClient struct {
+	mu sync.Mutex
+
+	GetIssueFunc      func(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error)
+	CreateCommentFunc func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
+	UpdateCommentFunc func(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
+	DeleteCommentFunc func(ctx context.Context, owner, repo string, commentID int64) error
+
+	IssueGets      []forgeGetIssueCall
+	CommentCreates []forgeCommentCreateCall
+	CommentUpdates []forgeCommentUpdateCall
+	CommentDeletes []forgeCommentDeleteCall
+}
+
+type forgeGetIssueCall struct {
+	Owner  string
+	Repo   string
+	Number int64
+}
+
+type forgeCommentCreateCall struct {
+	Owner       string
+	Repo        string
+	IssueNumber int64
+	Req         forge.CreateCommentRequest
+}
+
+type forgeCommentUpdateCall struct {
+	Owner     string
+	Repo      string
+	CommentID int64
+	Req       forge.UpdateCommentRequest
+}
+
+type forgeCommentDeleteCall struct {
+	Owner     string
+	Repo      string
+	CommentID int64
+}
+
+func (f *fakeForgeClient) GetIssue(ctx context.Context, owner, repo string, number int64) (*forge.Issue, error) {
+	f.mu.Lock()
+	f.IssueGets = append(f.IssueGets, forgeGetIssueCall{Owner: owner, Repo: repo, Number: number})
+	fn := f.GetIssueFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, number)
+	}
+	return nil, forge.ErrUnsupportedEvent
+}
+
+func (f *fakeForgeClient) CreateComment(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error) {
+	f.mu.Lock()
+	f.CommentCreates = append(f.CommentCreates, forgeCommentCreateCall{Owner: owner, Repo: repo, IssueNumber: issueNumber, Req: req})
+	fn := f.CreateCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, issueNumber, req)
+	}
+	return &forge.Comment{
+		ID:   424242,
+		Body: req.Body,
+	}, nil
+}
+
+func (f *fakeForgeClient) UpdateComment(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error) {
+	f.mu.Lock()
+	f.CommentUpdates = append(f.CommentUpdates, forgeCommentUpdateCall{Owner: owner, Repo: repo, CommentID: commentID, Req: req})
+	fn := f.UpdateCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, commentID, req)
+	}
+	return &forge.Comment{ID: commentID, Body: req.Body}, nil
+}
+
+func (f *fakeForgeClient) DeleteComment(ctx context.Context, owner, repo string, commentID int64) error {
+	f.mu.Lock()
+	f.CommentDeletes = append(f.CommentDeletes, forgeCommentDeleteCall{Owner: owner, Repo: repo, CommentID: commentID})
+	fn := f.DeleteCommentFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, owner, repo, commentID)
+	}
+	return nil
 }

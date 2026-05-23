@@ -240,22 +240,82 @@ func TestIsKnownAPIPath(t *testing.T) {
 	}
 }
 
-// GET on an issues endpoint with external_id/external_source must return 404
-// — the bridge's GetIssueByExternalRef uses 404 as ErrNotFound, which is the
-// signal to take the create path. If the stub ever starts answering 200
-// here, the e2e job will fail because the bridge will try to update a work
-// item that was never created.
-func TestGetOnAPIPathReturns404(t *testing.T) {
+// GET on an issues endpoint with external_id/external_source returns 404
+// when no matching work item has been POSTed, and 200 with the previously
+// POSTed object when one has. This lets the bridge's GetIssueByExternalRef
+// take the create path the first time and the update path on re-delivery,
+// just like real Plane.
+func TestGetExternalRef_NotFoundThenFound(t *testing.T) {
 	srv := httptest.NewServer(newMux(&recorder{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer srv.Close()
 
-	resp, err := srv.Client().Get(srv.URL + "/api/v1/workspaces/ci/projects/abc/issues/?external_id=42&external_source=forge")
+	url := srv.URL + "/api/v1/workspaces/ci/projects/abc/issues/?external_id=42&external_source=forge:o/r"
+
+	// Before any POST: 404.
+	resp, err := srv.Client().Get(url)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("get pre-post: %v", err)
 	}
-	defer resp.Body.Close()
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
+		t.Fatalf("pre-post status = %d, want 404", resp.StatusCode)
+	}
+
+	// POST a work item with external_source / external_id.
+	createBody := `{"name":"hello","external_source":"forge:o/r","external_id":"42"}`
+	postResp, err := srv.Client().Post(srv.URL+"/api/v1/workspaces/ci/projects/abc/issues/", "application/json", strings.NewReader(createBody))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postResp.Body.Close()
+	if postResp.StatusCode != http.StatusOK {
+		t.Fatalf("post status = %d, want 200", postResp.StatusCode)
+	}
+
+	// After POST: 200 with the work item.
+	resp2, err := srv.Client().Get(url)
+	if err != nil {
+		t.Fatalf("get post-post: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("post-post status = %d, want 200", resp2.StatusCode)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["external_id"] != "42" || got["external_source"] != "forge:o/r" {
+		t.Errorf("recalled item missing external fields: %+v", got)
+	}
+	if got["id"] == nil || got["id"] == "" {
+		t.Error("recalled item has no id")
+	}
+}
+
+// Reset clears the work item store so a subsequent lookup misses again.
+func TestResetClearsWorkItemStore(t *testing.T) {
+	srv := httptest.NewServer(newMux(&recorder{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer srv.Close()
+	url := srv.URL + "/api/v1/workspaces/ci/projects/abc/issues/?external_id=7&external_source=forge:o/r"
+	postBody := `{"external_source":"forge:o/r","external_id":"7"}`
+	r1, err := srv.Client().Post(srv.URL+"/api/v1/workspaces/ci/projects/abc/issues/", "application/json", strings.NewReader(postBody))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	r1.Body.Close()
+	r2, err := srv.Client().Post(srv.URL+"/_/reset", "", nil)
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	r2.Body.Close()
+	r3, err := srv.Client().Get(url)
+	if err != nil {
+		t.Fatalf("get post-reset: %v", err)
+	}
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusNotFound {
+		t.Fatalf("post-reset status = %d, want 404", r3.StatusCode)
 	}
 }
 

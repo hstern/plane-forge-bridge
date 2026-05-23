@@ -126,6 +126,58 @@ func (c *Client) GetIssueByExternalRef(ctx context.Context, projectID, source, e
 	return &out, nil
 }
 
+// GetIssue returns a single work item by its Plane UUID. Useful for the
+// plane→forge direction: when a comment event arrives, the bridge looks
+// up the work item to read its external_source / external_id and figure
+// out which forge repo + issue to comment on. Returns ErrNotFound on 404.
+func (c *Client) GetIssue(ctx context.Context, projectID, issueID string) (*WorkItem, error) {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/issues/%s/", c.WorkspaceSlug, projectID, issueID)
+	var out WorkItem
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CreateComment posts a new comment on a work item.
+func (c *Client) CreateComment(ctx context.Context, projectID, issueID string, req CreateCommentRequest) (*CommentResponse, error) {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/issues/%s/comments/", c.WorkspaceSlug, projectID, issueID)
+	var out CommentResponse
+	if err := c.do(ctx, http.MethodPost, path, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateComment patches an existing comment. The pointer field in
+// UpdateCommentRequest lets the caller patch only what's set.
+func (c *Client) UpdateComment(ctx context.Context, projectID, issueID, commentID string, req UpdateCommentRequest) (*CommentResponse, error) {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/issues/%s/comments/%s/", c.WorkspaceSlug, projectID, issueID, commentID)
+	var out CommentResponse
+	if err := c.do(ctx, http.MethodPatch, path, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteComment removes a comment. Returns ErrNotFound on 404 so callers
+// can treat "already gone" as a no-op in the plane→forge mirror path.
+func (c *Client) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error {
+	path := fmt.Sprintf("/workspaces/%s/projects/%s/issues/%s/comments/%s/", c.WorkspaceSlug, projectID, issueID, commentID)
+	if err := c.do(ctx, http.MethodDelete, path, nil, nil, nil); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 // ListProjectStates returns the workflow states defined on a project. Used
 // by callers that need to translate a forge state ("open"/"closed") to a
 // Plane state UUID via the configured state_map. The endpoint is paginated;

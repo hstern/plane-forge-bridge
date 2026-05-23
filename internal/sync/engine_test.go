@@ -48,7 +48,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeClient) {
 	}
 	cfg.BridgeBot.ForgeUsername = "pfb-bot"
 	cfg.BridgeBot.PlaneMemberID = "plane-uuid-bot"
-	return NewEngine(fc, cfg, testLogger()), fc
+	return NewEngine(fc, nil, cfg, testLogger()), fc
 }
 
 // mkIssueEvent builds a forge.Event for an issue.* delivery. Callers
@@ -104,8 +104,13 @@ func TestHandle_IssueOpened_Creates(t *testing.T) {
 	if req.ExternalSource != "forge:"+testRepo {
 		t.Errorf("ExternalSource=%q", req.ExternalSource)
 	}
-	if req.ExternalID != "42" {
-		t.Errorf("ExternalID=%q, want 42", req.ExternalID)
+	// external_id is the forge issue NUMBER (per-repo monotonic), not the
+	// internal database ID — see externalRef and README "External reference
+	// convention". Step 6 used ID; step 7 switched to Number so the plane→
+	// forge inbound path can resolve the forge issue with GetIssue(owner,
+	// repo, number).
+	if req.ExternalID != "7" {
+		t.Errorf("ExternalID=%q, want 7 (issue.Number)", req.ExternalID)
 	}
 	if !strings.Contains(req.DescriptionHTML, "<!-- pfb:src=forge,evt=delivery-abc -->") {
 		t.Errorf("description missing marker: %q", req.DescriptionHTML)
@@ -391,6 +396,396 @@ func TestHandle_PreservesIdempotency(t *testing.T) {
 	}
 	if len(fc.Creates) != 1 {
 		t.Errorf("want exactly 1 CreateIssue across the two calls, got %d", len(fc.Creates))
+	}
+}
+
+// TestExternalRef_UsesIssueNumber is a regression guard for the step-6 →
+// step-7 contract change. external_id must be the forge issue Number, not
+// the internal database ID, so the plane→forge inbound path can resolve
+// the forge issue with forge.GetIssue(owner, repo, number).
+func TestExternalRef_UsesIssueNumber(t *testing.T) {
+	t.Parallel()
+	repo := forge.Repository{FullName: "acme/widgets"}
+	issue := forge.Issue{ID: 999, Number: 7}
+	source, id := externalRef(repo, issue)
+	if source != "forge:acme/widgets" {
+		t.Errorf("source=%q, want forge:acme/widgets", source)
+	}
+	if id != "7" {
+		t.Errorf("id=%q, want 7 (Number, not ID)", id)
+	}
+}
+
+func TestParseExternalRef(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		source     string
+		externalID string
+		wantOwner  string
+		wantRepo   string
+		wantNumber int64
+		wantErr    bool
+	}{
+		{
+			name: "happy path", source: "forge:acme/widgets", externalID: "42",
+			wantOwner: "acme", wantRepo: "widgets", wantNumber: 42,
+		},
+		{
+			name: "missing prefix", source: "acme/widgets", externalID: "1",
+			wantErr: true,
+		},
+		{
+			name: "missing slash", source: "forge:acmewidgets", externalID: "1",
+			wantErr: true,
+		},
+		{
+			name: "too many slashes", source: "forge:acme/widgets/extra", externalID: "1",
+			wantErr: true,
+		},
+		{
+			name: "non-numeric external id", source: "forge:acme/widgets", externalID: "seven",
+			wantErr: true,
+		},
+		{
+			name: "negative external id", source: "forge:acme/widgets", externalID: "-1",
+			wantErr: true,
+		},
+		{
+			name: "zero external id", source: "forge:acme/widgets", externalID: "0",
+			wantErr: true,
+		},
+		{
+			name: "empty source", source: "", externalID: "1",
+			wantErr: true,
+		},
+		{
+			name: "empty external id", source: "forge:acme/widgets", externalID: "",
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			owner, repo, n, err := parseExternalRef(tc.source, tc.externalID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got owner=%q repo=%q n=%d", owner, repo, n)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if owner != tc.wantOwner || repo != tc.wantRepo || n != tc.wantNumber {
+				t.Errorf("got (%q,%q,%d), want (%q,%q,%d)",
+					owner, repo, n, tc.wantOwner, tc.wantRepo, tc.wantNumber)
+			}
+		})
+	}
+}
+
+// mkCommentEvent builds a forge.Event for an issue_comment.* delivery.
+func mkCommentEvent(kind forge.EventKind, sender, body string) *forge.Event {
+	e := mkIssueEvent(forge.EventIssueCommentCreated, sender)
+	e.Kind = kind
+	e.DeliveryID = "delivery-cmt"
+	e.Comment = &forge.Comment{
+		ID:   555,
+		Body: body,
+		User: forge.User{
+			Login:   sender,
+			HTMLURL: "https://forge.example.com/" + sender,
+		},
+	}
+	return e
+}
+
+func TestHandle_ForgeCommentCreated_PostsToPlane(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	fc.GetIssueByExternalRefFunc = func(_ context.Context, projectID, _, _ string) (*plane.WorkItem, error) {
+		return &plane.WorkItem{ID: "wi-existing", Project: projectID}, nil
+	}
+	evt := mkCommentEvent(forge.EventIssueCommentCreated, testForgeUser, "hello from forge")
+
+	out, err := e.HandleForgeComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionCreated {
+		t.Fatalf("action=%v, want ActionCreated", out.Action)
+	}
+	if out.WorkItemID != "wi-existing" {
+		t.Errorf("WorkItemID=%q, want wi-existing", out.WorkItemID)
+	}
+	if out.CommentID == "" {
+		t.Error("CommentID empty on Created comment outcome")
+	}
+	if len(fc.CommentCreates) != 1 {
+		t.Fatalf("want 1 CreateComment call, got %d", len(fc.CommentCreates))
+	}
+	cc := fc.CommentCreates[0]
+	if cc.ProjectID != testProjectID {
+		t.Errorf("ProjectID=%q", cc.ProjectID)
+	}
+	if cc.IssueID != "wi-existing" {
+		t.Errorf("IssueID=%q, want wi-existing", cc.IssueID)
+	}
+	if !strings.Contains(cc.Req.CommentHTML, "<!-- pfb:src=forge,evt=delivery-cmt -->") {
+		t.Errorf("CommentHTML missing marker: %q", cc.Req.CommentHTML)
+	}
+	if !strings.Contains(cc.Req.CommentHTML, "hello from forge") {
+		t.Errorf("CommentHTML missing body: %q", cc.Req.CommentHTML)
+	}
+}
+
+func TestHandle_ForgeCommentCreated_NoLinkSkips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	evt := mkCommentEvent(forge.EventIssueCommentCreated, testForgeUser, "x")
+	evt.Repo.FullName = "other/repo"
+
+	out, err := e.HandleForgeComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v", out.Action)
+	}
+	if out.Reason != "no link configured for repo" {
+		t.Errorf("Reason=%q", out.Reason)
+	}
+	if len(fc.CommentCreates)+len(fc.Gets)+len(fc.GetsByID) != 0 {
+		t.Errorf("no-link skip touched API: creates=%d gets=%d getsByID=%d",
+			len(fc.CommentCreates), len(fc.Gets), len(fc.GetsByID))
+	}
+}
+
+func TestHandle_ForgeCommentCreated_IssueNotMirroredSkips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	// Default GetIssueByExternalRef returns ErrNotFound — comment fired
+	// before the issue mirror caught up.
+	evt := mkCommentEvent(forge.EventIssueCommentCreated, testForgeUser, "hi")
+
+	out, err := e.HandleForgeComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "before plane issue was mirrored") {
+		t.Errorf("Reason=%q does not mention mirror lag", out.Reason)
+	}
+	if len(fc.CommentCreates) != 0 {
+		t.Errorf("CreateComment should not be called; got %d", len(fc.CommentCreates))
+	}
+	if len(fc.Gets) != 1 {
+		t.Errorf("expected exactly the external-ref lookup, got %d gets", len(fc.Gets))
+	}
+}
+
+func TestHandle_ForgeCommentEdited_Skipped_DocumentedDeferral(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	evt := mkCommentEvent(forge.EventIssueCommentEdited, testForgeUser, "edited body")
+
+	out, err := e.HandleForgeComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "identity mapping") {
+		t.Errorf("Reason=%q does not mention identity mapping", out.Reason)
+	}
+	if len(fc.CommentCreates)+len(fc.CommentUpdates)+len(fc.CommentDeletes) != 0 {
+		t.Errorf("edited path made unexpected comment writes")
+	}
+}
+
+func TestHandle_ForgeCommentDeleted_Skipped_DocumentedDeferral(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	evt := mkCommentEvent(forge.EventIssueCommentDeleted, testForgeUser, "")
+
+	out, err := e.HandleForgeComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "identity mapping") {
+		t.Errorf("Reason=%q does not mention identity mapping", out.Reason)
+	}
+	if len(fc.CommentDeletes) != 0 {
+		t.Errorf("deleted path made unexpected DeleteComment calls")
+	}
+}
+
+// mkPlaneCommentEvent builds a plane.Event for a comment.* delivery.
+func mkPlaneCommentEvent(kind plane.EventKind) *plane.Event {
+	return &plane.Event{
+		Kind:       kind,
+		DeliveryID: "plane-delivery-cmt",
+		Action:     "create",
+		Actor:      plane.Actor{ID: "actor-id", DisplayName: "Alice"},
+		Comment: &plane.Comment{
+			ID:          "cmt-from-plane",
+			IssueID:     "wi-1234",
+			Project:     testProjectID,
+			CommentHTML: "hello from plane",
+		},
+	}
+}
+
+func TestHandle_PlaneCommentCreated_PostsToForge(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	ff := &fakeForgeClient{}
+	e.ForgeClient = ff
+	fc.GetIssueFunc = func(_ context.Context, projectID, issueID string) (*plane.WorkItem, error) {
+		return &plane.WorkItem{
+			ID:             issueID,
+			Project:        projectID,
+			ExternalSource: "forge:acme/widgets",
+			ExternalID:     "7",
+		}, nil
+	}
+	evt := mkPlaneCommentEvent(plane.EventCommentCreated)
+
+	out, err := e.HandlePlaneComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionCreated {
+		t.Fatalf("action=%v, want ActionCreated", out.Action)
+	}
+	if out.WorkItemID != "wi-1234" {
+		t.Errorf("WorkItemID=%q", out.WorkItemID)
+	}
+	if out.CommentID == "" {
+		t.Error("CommentID empty on plane→forge Created outcome")
+	}
+	if len(ff.CommentCreates) != 1 {
+		t.Fatalf("want 1 forge CreateComment call, got %d", len(ff.CommentCreates))
+	}
+	cc := ff.CommentCreates[0]
+	if cc.Owner != "acme" || cc.Repo != "widgets" || cc.IssueNumber != 7 {
+		t.Errorf("forge target = (%q,%q,%d), want (acme,widgets,7)",
+			cc.Owner, cc.Repo, cc.IssueNumber)
+	}
+	if !strings.Contains(cc.Req.Body, "<!-- pfb:src=plane,evt=plane-delivery-cmt -->") {
+		t.Errorf("forge comment body missing marker: %q", cc.Req.Body)
+	}
+	if !strings.Contains(cc.Req.Body, "hello from plane") {
+		t.Errorf("forge comment body missing source body: %q", cc.Req.Body)
+	}
+}
+
+func TestHandle_PlaneCommentCreated_MalformedExternalRefSkips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	ff := &fakeForgeClient{}
+	e.ForgeClient = ff
+	fc.GetIssueFunc = func(_ context.Context, projectID, issueID string) (*plane.WorkItem, error) {
+		// external_source missing the "forge:" prefix → parseExternalRef fails.
+		return &plane.WorkItem{
+			ID:             issueID,
+			Project:        projectID,
+			ExternalSource: "github:acme/widgets",
+			ExternalID:     "1",
+		}, nil
+	}
+	evt := mkPlaneCommentEvent(plane.EventCommentCreated)
+
+	out, err := e.HandlePlaneComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "no forge mirror") {
+		t.Errorf("Reason=%q does not mention missing forge mirror", out.Reason)
+	}
+	if len(ff.CommentCreates) != 0 {
+		t.Errorf("malformed ref path called forge CreateComment")
+	}
+}
+
+func TestHandle_PlaneCommentCreated_NoExternalIDSkips(t *testing.T) {
+	t.Parallel()
+	e, fc := newTestEngine(t)
+	ff := &fakeForgeClient{}
+	e.ForgeClient = ff
+	fc.GetIssueFunc = func(_ context.Context, projectID, issueID string) (*plane.WorkItem, error) {
+		return &plane.WorkItem{
+			ID:             issueID,
+			Project:        projectID,
+			ExternalSource: "forge:acme/widgets",
+			ExternalID:     "",
+		}, nil
+	}
+	evt := mkPlaneCommentEvent(plane.EventCommentCreated)
+
+	out, err := e.HandlePlaneComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if len(ff.CommentCreates) != 0 {
+		t.Errorf("no-external-id path called forge CreateComment")
+	}
+}
+
+func TestHandle_PlaneCommentEdited_Skipped_DocumentedDeferral(t *testing.T) {
+	t.Parallel()
+	e, _ := newTestEngine(t)
+	ff := &fakeForgeClient{}
+	e.ForgeClient = ff
+	evt := mkPlaneCommentEvent(plane.EventCommentUpdated)
+
+	out, err := e.HandlePlaneComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "identity mapping") {
+		t.Errorf("Reason=%q", out.Reason)
+	}
+	if len(ff.CommentUpdates) != 0 {
+		t.Errorf("plane edit path called forge UpdateComment")
+	}
+}
+
+func TestHandle_PlaneCommentDeleted_Skipped_DocumentedDeferral(t *testing.T) {
+	t.Parallel()
+	e, _ := newTestEngine(t)
+	ff := &fakeForgeClient{}
+	e.ForgeClient = ff
+	evt := mkPlaneCommentEvent(plane.EventCommentDeleted)
+
+	out, err := e.HandlePlaneComment(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("action=%v, want ActionSkipped", out.Action)
+	}
+	if !strings.Contains(out.Reason, "identity mapping") {
+		t.Errorf("Reason=%q", out.Reason)
+	}
+	if len(ff.CommentDeletes) != 0 {
+		t.Errorf("plane delete path called forge DeleteComment")
 	}
 }
 

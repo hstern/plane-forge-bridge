@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Assert that the bridge successfully translated a forge issue.opened event
-# into a Plane create-issue POST recorded by plane-stub.
+# into a Plane create-issue POST recorded by plane-stub. Optionally also
+# asserts a comment create was translated.
 #
 # Required env:
-#   PLANE_STUB_URL    plane-stub control plane (e.g. http://localhost:8081)
-#   FORGE_ORG         org name used during seeding (asserter checks external_source)
-#   FORGE_REPO        repo name used during seeding
-#   FORGE_ISSUE_ID    forge issue ID we created
-#   ISSUE_WAIT_SEC    how long to wait for the bridge to post (default 60)
+#   PLANE_STUB_URL      plane-stub control plane (e.g. http://localhost:8081)
+#   FORGE_ORG           org name used during seeding
+#   FORGE_REPO          repo name used during seeding
+#   FORGE_ISSUE_NUMBER  forge issue number we created (the user-facing number)
+#   ISSUE_WAIT_SEC      how long to wait for the bridge to post (default 60)
+#
+# Optional env (enables the comment assertion):
+#   ASSERT_COMMENT      "1" to also check that a comment POST was recorded
 
 set -euo pipefail
 log() { printf '[assert] %s\n' "$*" >&2; }
@@ -15,12 +19,12 @@ log() { printf '[assert] %s\n' "$*" >&2; }
 : "${PLANE_STUB_URL:?}"
 : "${FORGE_ORG:?}"
 : "${FORGE_REPO:?}"
-: "${FORGE_ISSUE_ID:?}"
+: "${FORGE_ISSUE_NUMBER:?}"
 
 wait_sec=${ISSUE_WAIT_SEC:-60}
 
 expected_source="forge:${FORGE_ORG}/${FORGE_REPO}"
-expected_id="${FORGE_ISSUE_ID}"
+expected_id="${FORGE_ISSUE_NUMBER}"
 
 # Poll /_/recorded for a POST that has external_source matching the link.
 log "polling $PLANE_STUB_URL/_/recorded for ~${wait_sec}s for the create POST"
@@ -70,5 +74,41 @@ if [ -z "$name" ]; then
   exit 1
 fi
 log "issue title carried through: name=$name"
+
+# Optional: assert that a comment translation was also recorded.
+if [ "${ASSERT_COMMENT:-0}" = "1" ]; then
+  log "polling for the bridge's forge→plane comment create"
+  comment_json=""
+  for i in $(seq 1 "$wait_sec"); do
+    body=$(curl -fsS "$PLANE_STUB_URL/_/recorded" 2>/dev/null || echo '[]')
+    comment_json=$(printf '%s' "$body" | jq -c '
+      .[] |
+      select(.method == "POST") |
+      select(.path | test("/api/v1/workspaces/[^/]+/projects/[^/]+/issues/[^/]+/comments/?$")) |
+      (.body | try fromjson) as $b |
+      select($b.comment_html != null) |
+      {path: .path, body: $b}
+    ' | head -n1)
+    if [ -n "$comment_json" ]; then
+      log "matched a recorded comment create after ${i}s"
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$comment_json" ]; then
+    log "ERROR: no matching comment POST recorded within ${wait_sec}s"
+    curl -fsS "$PLANE_STUB_URL/_/recorded" | jq . >&2 || true
+    exit 1
+  fi
+  log "matched comment payload:"
+  printf '%s\n' "$comment_json" | jq . >&2
+  c_html=$(printf '%s' "$comment_json" | jq -r '.body.comment_html // ""')
+  if ! printf '%s' "$c_html" | grep -q "<!-- pfb:src=forge,evt="; then
+    log "ERROR: comment_html missing loop-break marker"
+    log "comment_html=$c_html"
+    exit 1
+  fi
+  log "loop-break marker present in comment_html"
+fi
 
 log "all assertions passed"
