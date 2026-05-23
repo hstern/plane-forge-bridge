@@ -1,0 +1,66 @@
+# Local dev stack for plane-forge-bridge.
+#
+# This is a convenience, not a contract. CI does its own thing in
+# .github/workflows/ci.yaml. Copy config.example.yaml to config.yaml and
+# create a .env with any overrides before bringing the stack up.
+
+name: plane-forge-bridge
+
+networks:
+  pfb-dev:
+    driver: bridge
+
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15
+    container_name: pfb-forgejo
+    restart: unless-stopped
+    environment:
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__server__ROOT_URL: "http://localhost:3000/"
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__DOMAIN: "localhost"
+      FORGEJO__actions__ENABLED: "true"
+    ports:
+      - "3000:3000"
+    networks:
+      - pfb-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/v1/version >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  plane-stub:
+    build:
+      context: .
+      dockerfile: test/e2e-docker/plane-stub/Dockerfile
+    container_name: pfb-plane-stub
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    networks:
+      - pfb-dev
+
+  bridge:
+    build:
+      context: .
+      target: runtime
+    container_name: pfb-bridge
+    restart: unless-stopped
+    env_file:
+      # See config.example.yaml for the variables this stack expects. The
+      # .env file is gitignored; mark it optional so `docker compose` works
+      # before the operator creates one.
+      - path: .env
+        required: false
+    ports:
+      - "8080:8080"
+    networks:
+      - pfb-dev
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      plane-stub:
+        condition: service_started

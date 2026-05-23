@@ -1,0 +1,20 @@
+listen: ":8080"
+
+forge:
+  base_url: https://git.example.org
+  token_env: PFB_FORGE_TOKEN
+  webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+
+plane:
+  base_url: https://app.plane.so/api/v1
+  workspace_slug: my-workspace
+  api_key_env: PFB_PLANE_API_KEY
+  webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+
+bridge_bot:
+  forge_username: plane-bridge
+  plane_member_id: 00000000-0000-0000-0000-000000000000
+
+links:
+  - forge_repo: "/leading-slash"
+    plane_project_id: 11111111-1111-1111-1111-111111111111

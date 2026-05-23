@@ -1,0 +1,31 @@
+listen: ":8080"
+log_level: info
+
+forge:
+  base_url: https://git.example.org
+  token_env: PFB_FORGE_TOKEN
+  webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+
+plane:
+  base_url: https://app.plane.so/api/v1
+  workspace_slug: my-workspace
+  api_key_env: PFB_PLANE_API_KEY
+  webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+
+bridge_bot:
+  forge_username: plane-bridge
+  plane_member_id: 00000000-0000-0000-0000-000000000000
+
+links:
+  - forge_repo: my-org/my-repo
+    plane_project_id: 11111111-1111-1111-1111-111111111111
+    state_map:
+      open: Todo
+      closed: Done
+
+users:
+  alice: 22222222-2222-2222-2222-222222222222
+  bob:   33333333-3333-3333-3333-333333333333
+
+idemp:
+  lru_capacity: 1024

@@ -1,0 +1,41 @@
+{
+  "ref": "refs/heads/main",
+  "before": "1234567890abcdef00000000000000001234abcd",
+  "after":  "fedcba0987654321000000000000000000abcdef",
+  "compare_url": "https://forge.example.test/acme/widget/compare/1234567890ab...fedcba098765",
+  "commits": [
+    {
+      "id": "fedcba0987654321000000000000000000abcdef",
+      "message": "Fix flex overflow on the login page\n\nCloses [PROJ-42].",
+      "url": "https://forge.example.test/acme/widget/commit/fedcba098765"
+    }
+  ],
+  "pusher": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  },
+  "repository": {
+    "id": 500,
+    "name": "widget",
+    "full_name": "acme/widget",
+    "owner": {
+      "id": 1,
+      "login": "acme",
+      "full_name": "Acme Org",
+      "email": "ops@acme.test",
+      "html_url": "https://forge.example.test/acme"
+    },
+    "html_url": "https://forge.example.test/acme/widget",
+    "private": false
+  },
+  "sender": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  }
+}

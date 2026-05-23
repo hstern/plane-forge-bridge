@@ -1,0 +1,57 @@
+{
+  "action": "created",
+  "issue": {
+    "id": 1001,
+    "number": 42,
+    "title": "Login button is misaligned on small screens",
+    "body": "Repro: open the login page at 320px width.",
+    "state": "open",
+    "user": {
+      "id": 7,
+      "login": "alice",
+      "full_name": "Alice Example",
+      "email": "alice@example.test",
+      "html_url": "https://forge.example.test/alice"
+    },
+    "assignees": [],
+    "labels": [],
+    "html_url": "https://forge.example.test/acme/widget/issues/42",
+    "created_at": "2026-05-23T11:00:00Z",
+    "updated_at": "2026-05-23T11:00:00Z"
+  },
+  "comment": {
+    "id": 5005,
+    "body": "I can reproduce on a Pixel 5. Looks like the flex container is overflowing.",
+    "user": {
+      "id": 8,
+      "login": "bob",
+      "full_name": "Bob Example",
+      "email": "bob@example.test",
+      "html_url": "https://forge.example.test/bob"
+    },
+    "html_url": "https://forge.example.test/acme/widget/issues/42#issuecomment-5005",
+    "created_at": "2026-05-23T11:15:00Z",
+    "updated_at": "2026-05-23T11:15:00Z"
+  },
+  "repository": {
+    "id": 500,
+    "name": "widget",
+    "full_name": "acme/widget",
+    "owner": {
+      "id": 1,
+      "login": "acme",
+      "full_name": "Acme Org",
+      "email": "ops@acme.test",
+      "html_url": "https://forge.example.test/acme"
+    },
+    "html_url": "https://forge.example.test/acme/widget",
+    "private": false
+  },
+  "sender": {
+    "id": 8,
+    "login": "bob",
+    "full_name": "Bob Example",
+    "email": "bob@example.test",
+    "html_url": "https://forge.example.test/bob"
+  }
+}
