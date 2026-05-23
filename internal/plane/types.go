@@ -52,17 +52,19 @@ type Actor struct {
 // UI and "issues" in its database / API; we use the UI name in our public
 // surface.
 type WorkItem struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description_html"`
-	State       string   `json:"state"`
-	Priority    string   `json:"priority"`
-	Assignees   []string `json:"assignees"`
-	Labels      []string `json:"labels"`
-	Project     string   `json:"project"`
-	Workspace   string   `json:"workspace"`
-	CreatedBy   string   `json:"created_by"`
-	SequenceID  int      `json:"sequence_id"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description_html"`
+	State          string   `json:"state"`
+	Priority       string   `json:"priority"`
+	Assignees      []string `json:"assignees"`
+	Labels         []string `json:"labels"`
+	Project        string   `json:"project"`
+	Workspace      string   `json:"workspace"`
+	CreatedBy      string   `json:"created_by"`
+	SequenceID     int      `json:"sequence_id"`
+	ExternalSource string   `json:"external_source,omitempty"`
+	ExternalID     string   `json:"external_id,omitempty"`
 }
 
 // Comment is the minimal subset of Plane's IssueCommentSerializer output
