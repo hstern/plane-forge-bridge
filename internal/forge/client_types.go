@@ -21,6 +21,35 @@ type UpdateCommentRequest struct {
 	Body string `json:"body"`
 }
 
+// CreateIssueRequest is the body for
+// POST /repos/{owner}/{repo}/issues.
+//
+// Title is the only required field on Gitea/Forgejo. Labels are integer
+// IDs (NOT names), so the caller must resolve names → IDs via
+// ListRepoLabels + CreateRepoLabel first. Assignees are forge usernames.
+type CreateIssueRequest struct {
+	Title     string   `json:"title"`
+	Body      string   `json:"body,omitempty"`
+	Labels    []int64  `json:"labels,omitempty"`
+	Assignees []string `json:"assignees,omitempty"`
+}
+
+// UpdateIssueRequest is the body for
+// PATCH /repos/{owner}/{repo}/issues/{number}.
+//
+// All fields are pointers (slices included via *[]X) so callers can
+// distinguish "leave alone" (nil) from "set" (non-nil). State accepts
+// "open" or "closed" and is the canonical way to reopen or close an
+// issue via this client. Labels here, as on create, are integer IDs —
+// resolve names → IDs via ListRepoLabels + CreateRepoLabel first.
+type UpdateIssueRequest struct {
+	Title     *string   `json:"title,omitempty"`
+	Body      *string   `json:"body,omitempty"`
+	State     *string   `json:"state,omitempty"` // "open" | "closed"
+	Labels    *[]int64  `json:"labels,omitempty"`
+	Assignees *[]string `json:"assignees,omitempty"`
+}
+
 // CreateLabelRequest is the body for
 // POST /repos/{owner}/{repo}/labels.
 //

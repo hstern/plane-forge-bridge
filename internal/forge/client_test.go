@@ -614,6 +614,335 @@ func TestCreateRepoLabel_RequiredFields(t *testing.T) {
 	}
 }
 
+func TestCreateIssue_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		rawBody   []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read req body: %v", err)
+		}
+		rawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Issue{
+			ID:     555,
+			Number: 12,
+			Title:  "Bridge: investigate flaky e2e",
+			Body:   "saw it twice this week",
+			State:  "open",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.CreateIssue(context.Background(), "acme", "widgets", CreateIssueRequest{
+		Title:     "Bridge: investigate flaky e2e",
+		Body:      "saw it twice this week",
+		Labels:    []int64{1, 2},
+		Assignees: []string{"alice"},
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if want := "/api/v1/repos/acme/widgets/issues"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+
+	// Decode into a map to assert the wire shape: labels must be a JSON
+	// array of *numbers* (forge IDs), NOT strings.
+	var asMap map[string]any
+	if err := json.Unmarshal(rawBody, &asMap); err != nil {
+		t.Fatalf("unmarshal sent body %q: %v", rawBody, err)
+	}
+	if asMap["title"] != "Bridge: investigate flaky e2e" {
+		t.Errorf(`body["title"] = %v, want the issue title`, asMap["title"])
+	}
+	if asMap["body"] != "saw it twice this week" {
+		t.Errorf(`body["body"] = %v, want the issue body`, asMap["body"])
+	}
+	labels, ok := asMap["labels"].([]any)
+	if !ok {
+		t.Fatalf(`body["labels"] = %v (type %T), want a JSON array`, asMap["labels"], asMap["labels"])
+	}
+	if len(labels) != 2 {
+		t.Fatalf("len(labels) = %d, want 2", len(labels))
+	}
+	for i, lbl := range labels {
+		if _, isNum := lbl.(float64); !isNum {
+			t.Errorf("labels[%d] = %v (type %T), want number (forge label ID)", i, lbl, lbl)
+		}
+	}
+	assignees, ok := asMap["assignees"].([]any)
+	if !ok || len(assignees) != 1 || assignees[0] != "alice" {
+		t.Errorf(`body["assignees"] = %v, want ["alice"]`, asMap["assignees"])
+	}
+
+	if got.ID != 555 || got.Number != 12 || got.Title != "Bridge: investigate flaky e2e" {
+		t.Errorf("issue = %+v, want ID=555 Number=12 Title=Bridge: investigate flaky e2e", got)
+	}
+}
+
+func TestCreateIssue_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"message":"title is required"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	_, err := c.CreateIssue(context.Background(), "acme", "widgets", CreateIssueRequest{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("StatusCode = %d, want 422", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "title is required") {
+		t.Errorf("Body = %q, want it to include the upstream message", apiErr.Body)
+	}
+	if apiErr.Method != http.MethodPost {
+		t.Errorf("Method = %q, want POST", apiErr.Method)
+	}
+}
+
+func TestCreateIssue_RequiredFields(t *testing.T) {
+	t.Parallel()
+
+	// Pin the wire shape: only `title` is required upstream. Empty body,
+	// nil/empty labels, and nil/empty assignees must be omitted from the
+	// JSON (json:"...,omitempty") rather than sent as empty values.
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read req body: %v", err)
+		}
+		rawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Issue{ID: 1, Number: 1, Title: "only-title"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	if _, err := c.CreateIssue(context.Background(), "acme", "widgets", CreateIssueRequest{
+		Title: "only-title",
+	}); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(rawBody, &asMap); err != nil {
+		t.Fatalf("unmarshal sent body %q: %v", rawBody, err)
+	}
+	if got := asMap["title"]; got != "only-title" {
+		t.Errorf(`body["title"] = %v, want "only-title"`, got)
+	}
+	for _, key := range []string{"body", "labels", "assignees"} {
+		if _, present := asMap[key]; present {
+			t.Errorf("body contains %q key when value was empty; raw=%q", key, rawBody)
+		}
+	}
+}
+
+func TestUpdateIssue_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		rawBody   []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		assertCommonHeaders(t, r)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read req body: %v", err)
+		}
+		rawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(Issue{
+			ID:     555,
+			Number: 12,
+			Title:  "edited title",
+			State:  "open",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	title := "edited title"
+	body := "edited body"
+	labels := []int64{3, 4}
+	assignees := []string{"bob"}
+	got, err := c.UpdateIssue(context.Background(), "acme", "widgets", 12, UpdateIssueRequest{
+		Title:     &title,
+		Body:      &body,
+		Labels:    &labels,
+		Assignees: &assignees,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if gotMethod != http.MethodPatch {
+		t.Errorf("method = %q, want PATCH", gotMethod)
+	}
+	if want := "/api/v1/repos/acme/widgets/issues/12"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(rawBody, &asMap); err != nil {
+		t.Fatalf("unmarshal sent body %q: %v", rawBody, err)
+	}
+	if asMap["title"] != "edited title" {
+		t.Errorf(`body["title"] = %v, want "edited title"`, asMap["title"])
+	}
+	if asMap["body"] != "edited body" {
+		t.Errorf(`body["body"] = %v, want "edited body"`, asMap["body"])
+	}
+	gotLabels, ok := asMap["labels"].([]any)
+	if !ok || len(gotLabels) != 2 {
+		t.Fatalf(`body["labels"] = %v, want 2-element array`, asMap["labels"])
+	}
+	for i, lbl := range gotLabels {
+		if _, isNum := lbl.(float64); !isNum {
+			t.Errorf("labels[%d] = %v (type %T), want number (forge label ID)", i, lbl, lbl)
+		}
+	}
+
+	if got.ID != 555 || got.Number != 12 || got.Title != "edited title" {
+		t.Errorf("issue = %+v, want ID=555 Number=12 Title=\"edited title\"", got)
+	}
+}
+
+func TestUpdateIssue_StateCloseOnly(t *testing.T) {
+	t.Parallel()
+
+	// An UpdateIssueRequest with only State set must produce a body
+	// containing only "state" — every other field is a pointer with
+	// json:"...,omitempty" so a nil value drops it from the wire. This
+	// guarantees the bridge can flip state without inadvertently
+	// blanking the title/body/labels/assignees.
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read req body: %v", err)
+		}
+		rawBody = b
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(Issue{ID: 555, Number: 12, State: "closed"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	state := "closed"
+	if _, err := c.UpdateIssue(context.Background(), "acme", "widgets", 12, UpdateIssueRequest{
+		State: &state,
+	}); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(rawBody, &asMap); err != nil {
+		t.Fatalf("unmarshal sent body %q: %v", rawBody, err)
+	}
+	if got := asMap["state"]; got != "closed" {
+		t.Errorf(`body["state"] = %v, want "closed"`, got)
+	}
+	if len(asMap) != 1 {
+		t.Errorf("body has %d keys, want exactly 1 (state); raw=%q", len(asMap), rawBody)
+	}
+	for _, key := range []string{"title", "body", "labels", "assignees"} {
+		if _, present := asMap[key]; present {
+			t.Errorf("body contains %q key when pointer was nil; raw=%q", key, rawBody)
+		}
+	}
+}
+
+func TestUpdateIssue_NotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"issue does not exist"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	state := "closed"
+	_, err := c.UpdateIssue(context.Background(), "acme", "widgets", 999, UpdateIssueRequest{State: &state})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	// And we should NOT surface an *APIError for the 404 — callers
+	// distinguish "no such issue" (ErrNotFound) from "forge is broken".
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("404 was surfaced as *APIError (%v); want sentinel ErrNotFound only", apiErr)
+	}
+}
+
+func TestUpdateIssue_APIError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"db is down"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	state := "closed"
+	_, err := c.UpdateIssue(context.Background(), "acme", "widgets", 12, UpdateIssueRequest{State: &state})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (type %T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if !strings.Contains(apiErr.Body, "db is down") {
+		t.Errorf("Body = %q, want it to include the upstream message", apiErr.Body)
+	}
+	if apiErr.Method != http.MethodPatch {
+		t.Errorf("Method = %q, want PATCH", apiErr.Method)
+	}
+}
+
 func TestClient_AuthorizationToken(t *testing.T) {
 	t.Parallel()
 
