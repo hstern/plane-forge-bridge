@@ -144,6 +144,36 @@ func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentI
 	return nil
 }
 
+// ListRepoLabels returns the labels defined on owner/repo.
+//
+// The forge paginates label listings via `page` and `limit` query params;
+// this method requests the first page with `limit=50`, which is enough
+// for the handful of labels any real repo has. If a repo ever needs
+// more, the signature can grow a paging option without breaking callers.
+//
+// Note: unlike Plane, Gitea/Forgejo list endpoints return a bare JSON
+// array (NOT a `{results: [...]}` envelope), so the response is decoded
+// straight into `[]Label`.
+func (c *Client) ListRepoLabels(ctx context.Context, owner, repo string) ([]Label, error) {
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/labels?page=1&limit=50", owner, repo)
+	var out []Label
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateRepoLabel creates a label on owner/repo.
+// POST /repos/{owner}/{repo}/labels.
+func (c *Client) CreateRepoLabel(ctx context.Context, owner, repo string, req CreateLabelRequest) (*Label, error) {
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/labels", owner, repo)
+	var out Label
+	if err := c.do(ctx, http.MethodPost, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // do is the shared request/response plumbing. body may be nil; out may
 // be nil.
 //
