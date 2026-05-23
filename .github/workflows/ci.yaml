@@ -185,9 +185,15 @@ jobs:
           cname=$(docker inspect -f '{{.Name}}' "$cid" | sed 's|^/||')
           net=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" | tr ' ' '\n' | grep -vE '^(bridge|host|none|)$' | head -n1)
           if [ -z "$net" ]; then net=bridge; fi
-          echo "forge container=$cname network=$net"
+          # Use the container's IP directly for the bridge's forge URL —
+          # docker DNS over the auto-generated container name has been flaky
+          # under load (one Forgejo leg hit "no such host"); the IP is
+          # stable for the duration of the job. Matches fj-bellows' pattern.
+          ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$cid")
+          echo "forge container=$cname network=$net ip=$ip"
           echo "name=$cname"   >> "$GITHUB_OUTPUT"
           echo "network=$net" >> "$GITHUB_OUTPUT"
+          echo "ip=$ip"       >> "$GITHUB_OUTPUT"
 
       - name: Start plane-stub on the forge network
         run: |
@@ -205,7 +211,9 @@ jobs:
 
       - name: Write bridge config
         env:
-          FORGE_INTERNAL_HOST: ${{ steps.forge.outputs.name }}
+          # Address forge by IP rather than container DNS name — docker DNS
+          # over the auto-generated underscored hostnames has been flaky.
+          FORGE_INTERNAL_HOST: ${{ steps.forge.outputs.ip }}
         run: |
           set -euo pipefail
           # The bridge config uses container names (resolved on the docker
