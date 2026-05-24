@@ -99,11 +99,11 @@ func VerifyAndParse(secret string, headers http.Header, body []byte) (*Event, er
 
 func workItemKind(action string) (EventKind, error) {
 	switch action {
-	case actionCreate:
+	case actionCreate, actionCreated:
 		return EventWorkItemCreated, nil
-	case actionUpdate:
+	case actionUpdate, actionUpdated:
 		return EventWorkItemUpdated, nil
-	case actionDelete:
+	case actionDelete, actionDeleted:
 		return EventWorkItemDeleted, nil
 	default:
 		return "", fmt.Errorf("%w: issue action %q", ErrUnsupportedEvent, action)
@@ -112,11 +112,11 @@ func workItemKind(action string) (EventKind, error) {
 
 func commentKind(action string) (EventKind, error) {
 	switch action {
-	case actionCreate:
+	case actionCreate, actionCreated:
 		return EventCommentCreated, nil
-	case actionUpdate:
+	case actionUpdate, actionUpdated:
 		return EventCommentUpdated, nil
-	case actionDelete:
+	case actionDelete, actionDeleted:
 		return EventCommentDeleted, nil
 	default:
 		return "", fmt.Errorf("%w: issue_comment action %q", ErrUnsupportedEvent, action)

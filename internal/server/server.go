@@ -368,10 +368,23 @@ func (s *Server) respondVerifyParseErr(w http.ResponseWriter, r *http.Request, s
 	case errors.Is(err, forge.ErrMissingEventHeader),
 		errors.Is(err, plane.ErrMissingEventHeader):
 		http.Error(w, "missing event header", http.StatusBadRequest)
-	case errors.Is(err, forge.ErrUnsupportedEvent),
-		errors.Is(err, plane.ErrUnsupportedEvent):
-		// Acknowledge events we don't handle so the forge stops retrying.
+	case errors.Is(err, forge.ErrUnsupportedEvent):
+		// Forges legitimately fan out events the operator didn't subscribe
+		// to (e.g. push events from a repo whose webhook also covers
+		// issues). Log at DEBUG so production isn't flooded.
 		s.log.LogAttrs(r.Context(), slog.LevelDebug, "webhook event ignored",
+			slog.String("side", side),
+			slog.String("err", err.Error()),
+		)
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, plane.ErrUnsupportedEvent):
+		// Plane only sends event types the operator subscribed to, so
+		// any unsupported event here means a contract mismatch with
+		// real Plane (e.g. an action-verb spelling we don't recognise).
+		// Log at INFO so it surfaces at the default log level — silent
+		// 204s on a wholly-broken integration are a brutal failure
+		// mode. See GH#10 (PFB-22).
+		s.log.LogAttrs(r.Context(), slog.LevelInfo, "plane webhook event ignored",
 			slog.String("side", side),
 			slog.String("err", err.Error()),
 		)
