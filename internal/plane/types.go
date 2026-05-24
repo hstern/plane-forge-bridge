@@ -33,11 +33,19 @@ const (
 	planeEventIssueComment = "issue_comment"
 )
 
-// Plane "action" values in the body envelope.
+// Plane "action" values in the body envelope. Real Plane (verified
+// against v1.3.1's webhook_task.py) sends past-tense verbs
+// ("created"/"updated"/"deleted"), matching the GitHub/GitLab webhook
+// convention. The present-tense form ("create"/"update"/"delete") shows
+// up in older / non-bgtask code paths and in some hand-rolled clients,
+// so the parser accepts both — the past-tense form is canonical.
 const (
-	actionCreate = "create"
-	actionUpdate = "update"
-	actionDelete = "delete"
+	actionCreate  = "create"
+	actionUpdate  = "update"
+	actionDelete  = "delete"
+	actionCreated = "created"
+	actionUpdated = "updated"
+	actionDeleted = "deleted"
 )
 
 // Actor is the (often partial) record of who triggered the event. Plane
