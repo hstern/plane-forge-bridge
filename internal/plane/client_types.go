@@ -97,6 +97,20 @@ type labelsListResponse struct {
 	Results []Label `json:"results"`
 }
 
+// Member is a Plane workspace member as exposed by the public v1
+// members endpoint. The endpoint deliberately omits OAuth/provider
+// identity (no github_id, gitea_id, sso subject, etc.) — only the
+// member's primary email is exposed. The bridge's identity resolver
+// matches forge users to Plane members by that email.
+type Member struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+	FirstName   string `json:"first_name,omitempty"`
+	LastName    string `json:"last_name,omitempty"`
+	Role        int    `json:"role,omitempty"`
+}
+
 // ErrNotFound is returned by GetIssueByExternalRef when no work item matches
 // the (source, externalID) pair. This is the normal "not yet mirrored" case
 // and callers should treat it as a signal to create, not as a failure.

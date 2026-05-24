@@ -36,18 +36,20 @@ type fakeClient struct {
 	CreateCommentFunc         func(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
 	UpdateCommentFunc         func(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteCommentFunc         func(ctx context.Context, projectID, issueID, commentID string) error
+	ListWorkspaceMembersFunc  func(ctx context.Context) ([]plane.Member, error)
 
-	Gets                    []getCall
-	GetsByID                []getByIDCall
-	GetsBySeq               []seqLookupCall
-	Creates                 []createCall
-	Updates                 []updateCall
-	Lists                   []string
-	ListProjectLabelsCalls  []string
-	CreateProjectLabelCalls []labelCreateCall
-	CommentCreates          []commentCreateCall
-	CommentUpdates          []commentUpdateCall
-	CommentDeletes          []commentDeleteCall
+	Gets                      []getCall
+	GetsByID                  []getByIDCall
+	GetsBySeq                 []seqLookupCall
+	Creates                   []createCall
+	Updates                   []updateCall
+	Lists                     []string
+	ListProjectLabelsCalls    []string
+	CreateProjectLabelCalls   []labelCreateCall
+	CommentCreates            []commentCreateCall
+	CommentUpdates            []commentUpdateCall
+	CommentDeletes            []commentDeleteCall
+	ListWorkspaceMembersCalls int
 }
 
 type labelCreateCall struct {
@@ -247,6 +249,19 @@ func (f *fakeClient) DeleteComment(ctx context.Context, projectID, issueID, comm
 	return nil
 }
 
+func (f *fakeClient) ListWorkspaceMembers(ctx context.Context) ([]plane.Member, error) {
+	f.mu.Lock()
+	f.ListWorkspaceMembersCalls++
+	fn := f.ListWorkspaceMembersFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	// Default: empty member list so tests that don't supply an override
+	// exercise the "no email match" path of the identity resolver.
+	return nil, nil
+}
+
 // snapshot returns copies of the recorded call slices so assertions can read
 // them without racing with concurrent calls in the test.
 func (f *fakeClient) snapshot() (gets []getCall, creates []createCall, updates []updateCall, lists []string) {
@@ -282,15 +297,17 @@ type fakeForgeClient struct {
 	CreateCommentFunc   func(ctx context.Context, owner, repo string, issueNumber int64, req forge.CreateCommentRequest) (*forge.Comment, error)
 	UpdateCommentFunc   func(ctx context.Context, owner, repo string, commentID int64, req forge.UpdateCommentRequest) (*forge.Comment, error)
 	DeleteCommentFunc   func(ctx context.Context, owner, repo string, commentID int64) error
+	SearchUsersFunc     func(ctx context.Context, query string) ([]forge.User, error)
 
-	IssueGets      []forgeGetIssueCall
-	IssueCreates   []forgeIssueCreateCall
-	IssueUpdates   []forgeIssueUpdateCall
-	LabelLists     []forgeLabelListCall
-	LabelCreates   []forgeLabelCreateCall
-	CommentCreates []forgeCommentCreateCall
-	CommentUpdates []forgeCommentUpdateCall
-	CommentDeletes []forgeCommentDeleteCall
+	IssueGets        []forgeGetIssueCall
+	IssueCreates     []forgeIssueCreateCall
+	IssueUpdates     []forgeIssueUpdateCall
+	LabelLists       []forgeLabelListCall
+	LabelCreates     []forgeLabelCreateCall
+	CommentCreates   []forgeCommentCreateCall
+	CommentUpdates   []forgeCommentUpdateCall
+	CommentDeletes   []forgeCommentDeleteCall
+	SearchUsersCalls []string
 }
 
 type forgeIssueCreateCall struct {
@@ -451,4 +468,17 @@ func (f *fakeForgeClient) DeleteComment(ctx context.Context, owner, repo string,
 		return fn(ctx, owner, repo, commentID)
 	}
 	return nil
+}
+
+func (f *fakeForgeClient) SearchUsers(ctx context.Context, query string) ([]forge.User, error) {
+	f.mu.Lock()
+	f.SearchUsersCalls = append(f.SearchUsersCalls, query)
+	fn := f.SearchUsersFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, query)
+	}
+	// Default: empty result. Tests that need a populated response set
+	// the override.
+	return nil, nil
 }

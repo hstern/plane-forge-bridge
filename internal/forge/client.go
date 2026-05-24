@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -197,6 +198,39 @@ func (c *Client) ListRepoLabels(ctx context.Context, owner, repo string) ([]Labe
 		return nil, err
 	}
 	return out, nil
+}
+
+// SearchUsers looks up users by free-text query (login or email).
+// Gitea/Forgejo: GET /users/search?q=<query>&limit=50
+//
+// Used by the identity resolver to find a forge user with a matching
+// email when translating plane → forge. The query is treated as a
+// substring match by upstream; the caller filters by exact email.
+//
+// Returns an empty slice (not an error) if no matches found.
+//
+// Note: unlike the bare-array list endpoints (e.g. ListRepoLabels),
+// this endpoint wraps results in a `{data: [...], ok: bool}` envelope —
+// the response is decoded into a private envelope type and then the
+// `data` slice is returned. If upstream sets `ok:false` on a 200 (which
+// has been observed when the search index is rebuilding) we treat that
+// as zero results rather than an error.
+func (c *Client) SearchUsers(ctx context.Context, query string) ([]User, error) {
+	path := "/api/v1/users/search?q=" + url.QueryEscape(query) + "&limit=50"
+	var env struct {
+		Data []User `json:"data"`
+		OK   bool   `json:"ok"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &env); err != nil {
+		return nil, err
+	}
+	if !env.OK {
+		return []User{}, nil
+	}
+	if env.Data == nil {
+		return []User{}, nil
+	}
+	return env.Data, nil
 }
 
 // CreateRepoLabel creates a label on owner/repo.

@@ -256,6 +256,29 @@ func (c *Client) CreateProjectLabel(ctx context.Context, projectID string, req C
 	return &out, nil
 }
 
+// ListWorkspaceMembers returns every workspace member exposed by the
+// public v1 members endpoint. Used by the identity resolver to match
+// forge user emails to Plane members.
+//
+// IMPORTANT: the public members API exposes only
+// {id, first_name, last_name, email, avatar, avatar_url, display_name,
+// role} — no OAuth/provider identity. The bridge can only match by
+// email. Verified against plane.stern.ca (CE).
+//
+// Unlike the project state/label list endpoints, this one returns a
+// bare JSON array rather than a {"results": [...]} envelope (confirmed
+// empirically against plane.stern.ca on 2026-05-23). If a future Plane
+// release switches it to the BasePaginator envelope, swap the decode
+// target for a struct with a Results field.
+func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]Member, error) {
+	path := fmt.Sprintf("/workspaces/%s/members/", c.WorkspaceSlug)
+	var out []Member
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // do is the shared request/response plumbing. body may be nil; out may be
 // nil. Query params are added to the URL if q is non-nil.
 //

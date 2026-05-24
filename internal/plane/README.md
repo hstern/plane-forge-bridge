@@ -103,6 +103,7 @@ func (c *Client) GetIssueBySequenceID(ctx context.Context, projectID string, seq
 func (c *Client) ListProjectStates(ctx context.Context, projectID string) ([]State, error)
 func (c *Client) ListProjectLabels(ctx context.Context, projectID string) ([]Label, error)
 func (c *Client) CreateProjectLabel(ctx context.Context, projectID string, req CreateLabelRequest) (*Label, error)
+func (c *Client) ListWorkspaceMembers(ctx context.Context) ([]Member, error)
 func (c *Client) CreateComment(ctx context.Context, projectID, issueID string, req CreateCommentRequest) (*CommentResponse, error)
 func (c *Client) UpdateComment(ctx context.Context, projectID, issueID, commentID string, req UpdateCommentRequest) (*CommentResponse, error)
 func (c *Client) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
@@ -144,6 +145,7 @@ response body preserved for diagnosis.
 | `CreateComment`          | POST   | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/`                    | `*CommentResponse`     |
 | `UpdateComment`          | PATCH  | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `*CommentResponse`     |
 | `DeleteComment`          | DELETE | `/workspaces/{slug}/projects/{pid}/issues/{iid}/comments/{cid}/`              | `error` / `ErrNotFound` |
+| `ListWorkspaceMembers`   | GET    | `/workspaces/{slug}/members/`                                                 | `[]Member`             |
 
 ### Comments
 
@@ -252,6 +254,27 @@ under-specifies the list endpoint:
    (`WorkspaceIssueAPIEndpoint.get`, lines ~228–248) and
    `apps/api/plane/api/urls/work_item.py` (the
    `work-item-by-identifier` / `issue-by-identifier` path entries).
+
+8. **Workspace members endpoint.** `GET /workspaces/{slug}/members/`
+   returns a **bare JSON array** rather than the `{"results": [...]}`
+   BasePaginator envelope used by `/states/` and `/labels/`. The docs
+   site is silent on whether this endpoint paginates, so the shape was
+   confirmed empirically against plane.stern.ca (CE) on 2026-05-23 —
+   the same instance the rest of this client was validated against.
+   `ListWorkspaceMembers` decodes directly into `[]Member`; if a future
+   Plane release switches the endpoint to the paginator envelope,
+   swap the decode target for a struct with a `Results` field.
+
+   **IMPORTANT (drives the v2 identity design):** the public members
+   API exposes only `{id, first_name, last_name, email, avatar,
+   avatar_url, display_name, role}`. There is **no OAuth/provider
+   identity** in the response — no `github_id`, `gitea_id`, SSO
+   subject, or linked-account list. The bridge can therefore only
+   match forge users to Plane members by **email**. This is the key
+   finding behind the bridge's v2 identity-resolver design: until
+   Plane exposes provider linkages on a public endpoint (or the
+   bridge ships its own OAuth handshake — see build-order step 11),
+   the only correlation key is the primary email both sides agree on.
 
 ## Open questions
 

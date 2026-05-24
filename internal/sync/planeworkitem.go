@@ -191,6 +191,21 @@ func (e *Engine) handlePlaneWorkItemCreated(ctx context.Context, evt *plane.Even
 	if len(forgeLabelIDs) > 0 {
 		req.Labels = forgeLabelIDs
 	}
+	// v2 identity resolution (plane→forge direction). Prefer the event
+	// Actor's member UUID (who took the action); fall back to the work
+	// item's CreatedBy when the actor is absent (some plane payloads
+	// omit it on system-generated events). An empty result leaves the
+	// forge issue unassigned — the bridge bot is still the API caller
+	// but doesn't impose itself as the assignee.
+	planeMember := evt.Actor.ID
+	if planeMember == "" {
+		planeMember = evt.WorkItem.CreatedBy
+	}
+	if planeMember != "" {
+		if login, _ := e.resolveForgeUser(ctx, planeMember); login != "" {
+			req.Assignees = []string{login}
+		}
+	}
 
 	issue, err := writer.CreateIssue(ctx, owner, repo, req)
 	if err != nil {

@@ -143,11 +143,17 @@ jobs:
           # on the docker network, so we open the allowlist. Not appropriate
           # for production.
           FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
+          # Don't hide user emails in API responses / webhook payloads. The
+          # v2 identity resolver matches forge sender email → plane member
+          # email; with the default ("keep private") on, webhooks ship
+          # <id>+<login>@noreply.localhost instead of the real address.
+          FORGEJO__service__DEFAULT_KEEP_EMAIL_PRIVATE: "false"
           GITEA__security__INSTALL_LOCK: "true"
           GITEA__server__ROOT_URL: "http://localhost:3000/"
           GITEA__server__HTTP_PORT: "3000"
           GITEA__server__DOMAIN: "localhost"
           GITEA__webhook__ALLOWED_HOST_LIST: "*"
+          GITEA__service__DEFAULT_KEEP_EMAIL_PRIVATE: "false"
     env:
       FORGE_URL: http://localhost:3000
       FORGE_ADMIN_USER: pfbadmin
@@ -356,6 +362,16 @@ jobs:
           done
           echo "FORGE_TOKEN=$token" >> "$GITHUB_ENV"
 
+      - name: Diagnostic — what does forge expose for the admin user
+        run: |
+          set -euo pipefail
+          echo "--- /users/$FORGE_ADMIN_USER ---"
+          curl -fsS -H "Authorization: token $FORGE_TOKEN" \
+            "$FORGE_URL/api/v1/users/$FORGE_ADMIN_USER" | jq '{login, email}'
+          echo "--- /user (authenticated /me) ---"
+          curl -fsS -H "Authorization: token $FORGE_TOKEN" \
+            "$FORGE_URL/api/v1/user" | jq '{login, email}'
+
       - name: Create a forge label for the e2e issue
         id: label
         run: |
@@ -412,13 +428,18 @@ jobs:
           cat /tmp/comment.json | head -c 2000; echo
           [ "$http_code" = "201" ] || { echo "ERROR: comment create returned $http_code"; exit 1; }
 
-      - name: Assert plane-stub recorded the issue + label + comment translations
+      - name: Assert plane-stub recorded the issue + label + comment + identity
         env:
           PLANE_STUB_URL: http://localhost:8081
           FORGE_ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           ISSUE_WAIT_SEC: 60
           ASSERT_COMMENT: "1"
           ASSERT_LABELS: "1"
+          # Matches plane-stub's fixedMembers entry whose email is
+          # pfbadmin@example.com (the forge admin user's email). The bridge's
+          # v2 identity resolver should map the forge sender to this Plane
+          # member by email.
+          ASSERT_ASSIGNEE: "22222222-0000-0000-0000-000000000001"
         run: |
           set -euo pipefail
           chmod +x test/e2e-docker/assert.sh

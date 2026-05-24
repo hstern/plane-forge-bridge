@@ -329,10 +329,15 @@ The build order from the scaffolding brief:
     auto-created). work_item.updated and work_item.deleted are
     skipped pending a forge.Client.SearchIssues to reverse-resolve
     the plane-ref marker; tracked as an open question.*
-11. v2: Plane→workspace-members API for identity (no custom OAuth needed —
-    Plane already supports Gitea/Forgejo as an authn provider, so the
-    forge identity is already in Plane's member metadata for users who
-    signed in via the provider; static config remains the fallback).
+11. v2: email-based identity matching. ← *done*. Original optimistic
+    plan (read forge identity from Plane workspace-member metadata) was
+    invalidated by research: Plane's public members API exposes only
+    `{id, first_name, last_name, email, avatar, avatar_url,
+    display_name, role}` — no OAuth/provider linkages. Step 11 instead
+    layers `config Users{} → email match (forge↔plane) → bridge bot`
+    with per-engine caching. A custom `/connect` OAuth handshake
+    remains a separate v3 effort if multi-tenant heterogeneous-email
+    scenarios become interesting.
 
 This list is the running progress tracker — update it as steps complete so
 the doc shows where the project actually is.
