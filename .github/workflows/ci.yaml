@@ -623,15 +623,74 @@ jobs:
           docker rm -f bridge 2>/dev/null
           docker rm -f plane-stub 2>/dev/null
 
+  # Real-Plane round-trip. Brings up a minimum Plane CE v1.3.1 stack
+  # (api+worker+deps, no frontends), seeds an admin user + workspace +
+  # project + API token via direct Django ORM (Plane CE has no headless
+  # signup flow), and runs the bridge's `plane` package integration
+  # tests against real Plane over the REST API. Catches the wire-shape
+  # drift class of bug that produced PFB-22, PFB-24, and PFB-25 —
+  # those all passed CI because the e2e-docker `plane-stub` happily
+  # agreed with the bridge's synthetic testdata.
+  #
+  # Separate from the e2e-docker matrix: Plane CE boot is ~90s on a
+  # cold cache, and the wire shape doesn't vary by forge flavor, so
+  # running once is enough.
+  e2e-real-plane:
+    name: e2e-real-plane
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Bring up Plane CE v1.3.1 + seed
+        id: seed
+        env:
+          # Lock the API token to a known value for grep-ability in
+          # bridge logs; otherwise seed.py emits a random UUID hex.
+          PFB_PLANE_API_KEY: ci-plane-token-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          seed_json=$(bash test/e2e-docker/plane-ce/run.sh up | tail -n1)
+          echo "seed_json=$seed_json"
+          # Mask the token in any subsequent logs.
+          token=$(echo "$seed_json" | jq -r '.api_token')
+          echo "::add-mask::$token"
+          # Expose every field as PFB_PLANE_TEST_<UPPER> for the test.
+          echo "$seed_json" | jq -r 'to_entries[] | "PFB_PLANE_TEST_\(.key|ascii_upcase)=\(.value)"' \
+            >> "$GITHUB_ENV"
+
+      - name: Run integration test against real Plane
+        env:
+          PFB_PLANE_TEST_BASE_URL: http://localhost:8765/api/v1
+        run: |
+          set -euo pipefail
+          go test -tags=integration ./internal/plane -run TestIntegration -v -count=1
+
+      - name: Plane logs (always)
+        if: always()
+        run: |
+          docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml \
+            logs --tail=80 plane-api plane-worker plane-beat-worker || true
+
+      - name: Tear down
+        if: always()
+        run: bash test/e2e-docker/plane-ce/run.sh down
+
   # Publish on push to main (rolling `:latest`) and on v* tag pushes (semver
   # tags). Never on PRs. Retag the build-image artifact rather than rebuild —
   # the bytes we publish are the bytes e2e-docker just validated.
   publish:
     name: publish
-    needs: [lint, build-image, e2e-docker]
+    needs: [lint, build-image, e2e-docker, e2e-real-plane]
     if: |
       github.event_name != 'pull_request' &&
       needs.e2e-docker.result == 'success' &&
+      needs.e2e-real-plane.result == 'success' &&
       needs.lint.result == 'success'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:

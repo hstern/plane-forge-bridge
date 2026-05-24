@@ -4,6 +4,24 @@ All notable changes to plane-forge-bridge are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **CI gains a real-Plane round-trip job (PFB-28).** The
+  `e2e-real-plane` workflow stage brings up a minimum Plane CE v1.3.1
+  stack (api+worker+postgres+redis+rabbitmq+minio) via
+  `test/e2e-docker/plane-ce/docker-compose.yaml`, seeds an admin user /
+  workspace / project / API token via direct Django ORM
+  (`seed.py` — Plane CE has no headless signup flow), and runs the
+  bridge's `plane` package integration test (`go test
+  -tags=integration ./internal/plane`) against real Plane over the
+  REST API. The publish gate now requires this job to pass alongside
+  `e2e-docker` and `lint`. Goal: future Plane wire-shape changes (the
+  PFB-22 / PFB-24 / PFB-25 class) fail in CI instead of in production —
+  the existing `plane-stub` happily agrees with synthetic testdata, so
+  it can't catch upstream drift on its own.
+
 ## [0.1.4] — 2026-05-24
 
 ### Fixed

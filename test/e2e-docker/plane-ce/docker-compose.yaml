@@ -1,0 +1,180 @@
+# Minimal Plane CE v1.3.1 stack for the bridge's real-Plane e2e tests.
+#
+# Trimmed from the upstream makeplane/plane docker-compose: we keep only
+# the services needed for REST + webhooks (api, worker, beat-worker,
+# migrator, postgres, redis, rabbitmq, minio). No frontends (web/space/
+# admin/live), no proxy — the bridge talks to Plane over the REST API at
+# http://plane-api:8000/ and receives webhooks back from plane-worker.
+#
+# Pinned to v1.3.1 to match internal/plane/testdata/. Bumping the version
+# requires recapturing testdata; see internal/plane/testdata/README.md.
+
+x-db-env: &db-env
+  PGHOST: plane-db
+  PGDATABASE: plane
+  POSTGRES_USER: plane
+  POSTGRES_PASSWORD: plane
+  POSTGRES_DB: plane
+  POSTGRES_PORT: "5432"
+  PGDATA: /var/lib/postgresql/data
+
+x-redis-env: &redis-env
+  REDIS_HOST: plane-redis
+  REDIS_PORT: "6379"
+  REDIS_URL: redis://plane-redis:6379/
+
+x-minio-env: &minio-env
+  MINIO_ROOT_USER: access-key
+  MINIO_ROOT_PASSWORD: secret-key
+
+x-aws-s3-env: &aws-s3-env
+  AWS_REGION: ""
+  AWS_ACCESS_KEY_ID: access-key
+  AWS_SECRET_ACCESS_KEY: secret-key
+  AWS_S3_ENDPOINT_URL: http://plane-minio:9000
+  AWS_S3_BUCKET_NAME: uploads
+
+x-mq-env: &mq-env
+  RABBITMQ_HOST: plane-mq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_DEFAULT_USER: plane
+  RABBITMQ_DEFAULT_PASS: plane
+  RABBITMQ_DEFAULT_VHOST: plane
+  RABBITMQ_VHOST: plane
+
+x-app-env: &app-env
+  # Plane's anti-SSRF webhook validator DNS-resolves and rejects private
+  # IPs. The bridge is reachable on this compose network as
+  # http://pfb-bridge:8080; WEBHOOK_ALLOWED_HOSTS bypasses the check.
+  # This must match the bridge container's hostname.
+  WEBHOOK_ALLOWED_HOSTS: pfb-bridge,host.docker.internal
+  WEBHOOK_ALLOWED_IPS: ""
+  WEB_URL: http://localhost:8000
+  DEBUG: "0"
+  CORS_ALLOWED_ORIGINS: http://localhost:8000
+  GUNICORN_WORKERS: "1"
+  USE_MINIO: "1"
+  DATABASE_URL: postgresql://plane:plane@plane-db/plane
+  SECRET_KEY: ci-secret-key-not-for-production-use-32chr
+  AMQP_URL: amqp://plane:plane@plane-mq:5672/plane
+  API_KEY_RATE_LIMIT: 600/minute
+  MINIO_ENDPOINT_SSL: "0"
+  LIVE_SERVER_SECRET_KEY: ci-live-secret-not-for-production-use32
+
+services:
+  plane-db:
+    image: postgres:15.7-alpine
+    command: postgres -c 'max_connections=1000'
+    environment:
+      <<: *db-env
+    # No volume — CI is one-shot, data dies with the compose down.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plane -d plane"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  plane-mq:
+    image: rabbitmq:3.13.6-management-alpine
+    # Run as the rabbitmq user inside the container. Default is root,
+    # which on rootless podman maps to a host UID that lacks read access
+    # to the in-image /var/lib/rabbitmq/ (owned by uid 100). With
+    # `user:` set, the container starts as rabbitmq directly and the
+    # .erlang.cookie permission dance works. Docker (CI) is unaffected
+    # either way; this also helps anyone running the e2e locally on
+    # podman.
+    user: "100:101"
+    environment:
+      <<: *mq-env
+    healthcheck:
+      # rabbitmq-diagnostics check_port_connectivity is the official
+      # readiness probe per upstream docs.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  plane-minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    command: server /export --console-address ":9090"
+    environment:
+      <<: *minio-env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  plane-migrator:
+    image: makeplane/plane-backend:v1.3.1
+    command: ./bin/docker-entrypoint-migrator.sh
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env]
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    restart: on-failure
+
+  plane-api:
+    image: makeplane/plane-backend:v1.3.1
+    command: ./bin/docker-entrypoint-api.sh
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env]
+    depends_on:
+      plane-migrator:
+        condition: service_completed_successfully
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-minio:
+        condition: service_healthy
+    ports:
+      # Expose to the host so seed scripts and integration tests outside
+      # the compose network can hit the REST API. 8765 is unlikely to
+      # collide with a developer's local services; the CI workflow can
+      # override via `services.plane-api.ports`.
+      - "8765:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/instances/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  plane-worker:
+    image: makeplane/plane-backend:v1.3.1
+    command: ./bin/docker-entrypoint-worker.sh
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *mq-env]
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+
+  plane-beat-worker:
+    image: makeplane/plane-backend:v1.3.1
+    command: ./bin/docker-entrypoint-beat.sh
+    environment:
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *mq-env]
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+
+networks:
+  default:
+    name: pfb-e2e-plane-ce
