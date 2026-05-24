@@ -95,7 +95,7 @@ func (e *Engine) HandlePlaneWorkItem(ctx context.Context, evt *plane.Event) (*Ou
 				Reason: reasonPlaneDeleteNotMirrored,
 			}, nil
 		}
-		return nil, fmt.Errorf("sync: %s with nil WorkItem", evt.Kind)
+		return nil, fmt.Errorf("%w: %s payload has no work_item", ErrMalformedEvent, evt.Kind)
 	}
 
 	link := e.linkForPlaneProject(evt.WorkItem.Project)

@@ -121,14 +121,33 @@ func (s *Server) handleForge(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// respondTranslatorErr writes the right HTTP response for a translator
+// error. ErrMalformedEvent → 422 (the webhook signature was valid but the
+// payload semantics were broken — the forge/Plane side should NOT retry,
+// since a retry of the same bytes will produce the same bad result).
+// Everything else → 500 (transient or programmer error; retry is fine).
+func (s *Server) respondTranslatorErr(w http.ResponseWriter, r *http.Request, side, deliveryID string, terr error) {
+	code := http.StatusInternalServerError
+	msg := "translator error"
+	level := slog.LevelError
+	if errors.Is(terr, pfbsync.ErrMalformedEvent) {
+		code = http.StatusUnprocessableEntity
+		msg = "malformed event"
+		level = slog.LevelWarn
+	}
+	s.log.LogAttrs(r.Context(), level, "translator failed",
+		slog.String("side", side),
+		slog.String("delivery_id", deliveryID),
+		slog.Int("status", code),
+		slog.String("err", terr.Error()),
+	)
+	http.Error(w, msg, code)
+}
+
 func (s *Server) dispatchForgeIssue(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
 	outcome, terr := s.translator.HandleForgeIssue(r.Context(), evt)
 	if terr != nil {
-		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge issue)",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("err", terr.Error()),
-		)
-		http.Error(w, "translator error", http.StatusInternalServerError)
+		s.respondTranslatorErr(w, r, "forge issue", evt.DeliveryID, terr)
 		return
 	}
 	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge issue translated",
@@ -146,11 +165,7 @@ func (s *Server) dispatchForgeIssue(w http.ResponseWriter, r *http.Request, evt 
 func (s *Server) dispatchForgeComment(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
 	outcome, terr := s.translator.HandleForgeComment(r.Context(), evt)
 	if terr != nil {
-		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge comment)",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("err", terr.Error()),
-		)
-		http.Error(w, "translator error", http.StatusInternalServerError)
+		s.respondTranslatorErr(w, r, "forge comment", evt.DeliveryID, terr)
 		return
 	}
 	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge comment translated",
@@ -169,11 +184,7 @@ func (s *Server) dispatchForgeComment(w http.ResponseWriter, r *http.Request, ev
 func (s *Server) dispatchForgePullRequest(w http.ResponseWriter, r *http.Request, evt *forge.Event) {
 	outcome, terr := s.translator.HandleForgePullRequest(r.Context(), evt)
 	if terr != nil {
-		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (forge pull_request)",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("err", terr.Error()),
-		)
-		http.Error(w, "translator error", http.StatusInternalServerError)
+		s.respondTranslatorErr(w, r, "forge pull_request", evt.DeliveryID, terr)
 		return
 	}
 	s.log.LogAttrs(r.Context(), slog.LevelInfo, "forge pull_request translated",
@@ -286,11 +297,7 @@ func (s *Server) handlePlane(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dispatchPlaneWorkItem(w http.ResponseWriter, r *http.Request, evt *plane.Event) {
 	outcome, terr := s.translator.HandlePlaneWorkItem(r.Context(), evt)
 	if terr != nil {
-		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (plane work_item)",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("err", terr.Error()),
-		)
-		http.Error(w, "translator error", http.StatusInternalServerError)
+		s.respondTranslatorErr(w, r, "plane work_item", evt.DeliveryID, terr)
 		return
 	}
 	s.log.LogAttrs(r.Context(), slog.LevelInfo, "plane work_item translated",
@@ -317,11 +324,7 @@ func isPlaneWorkItemEvent(k plane.EventKind) bool {
 func (s *Server) dispatchPlaneComment(w http.ResponseWriter, r *http.Request, evt *plane.Event) {
 	outcome, terr := s.translator.HandlePlaneComment(r.Context(), evt)
 	if terr != nil {
-		s.log.LogAttrs(r.Context(), slog.LevelError, "translator failed (plane comment)",
-			slog.String("delivery_id", evt.DeliveryID),
-			slog.String("err", terr.Error()),
-		)
-		http.Error(w, "translator error", http.StatusInternalServerError)
+		s.respondTranslatorErr(w, r, "plane comment", evt.DeliveryID, terr)
 		return
 	}
 	s.log.LogAttrs(r.Context(), slog.LevelInfo, "plane comment translated",
