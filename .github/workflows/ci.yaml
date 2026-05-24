@@ -412,13 +412,18 @@ jobs:
           cat /tmp/comment.json | head -c 2000; echo
           [ "$http_code" = "201" ] || { echo "ERROR: comment create returned $http_code"; exit 1; }
 
-      - name: Assert plane-stub recorded the issue + label + comment translations
+      - name: Assert plane-stub recorded the issue + label + comment + identity
         env:
           PLANE_STUB_URL: http://localhost:8081
           FORGE_ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           ISSUE_WAIT_SEC: 60
           ASSERT_COMMENT: "1"
           ASSERT_LABELS: "1"
+          # Matches plane-stub's fixedMembers entry whose email is
+          # pfbadmin@example.com (the forge admin user's email). The bridge's
+          # v2 identity resolver should map the forge sender to this Plane
+          # member by email.
+          ASSERT_ASSIGNEE: "22222222-0000-0000-0000-000000000001"
         run: |
           set -euo pipefail
           chmod +x test/e2e-docker/assert.sh

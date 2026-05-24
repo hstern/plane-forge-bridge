@@ -1327,8 +1327,8 @@ func TestHandle_PullRequestEdited_Skipped(t *testing.T) {
 func TestHandle_IssueOpened_AssigneeFromEmailMatch(t *testing.T) {
 	t.Parallel()
 	e, fc := newTestEngine(t)
-	fc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	fc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-stranger", Email: "stranger@example.com"},
 		}, nil
 	}

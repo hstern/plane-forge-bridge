@@ -12,6 +12,7 @@ import (
 
 	"github.com/hstern/plane-forge-bridge/internal/forge"
 	"github.com/hstern/plane-forge-bridge/internal/mapping"
+	"github.com/hstern/plane-forge-bridge/internal/plane"
 )
 
 // newIdentityEngine wires a minimal Engine with both fakes installed
@@ -37,7 +38,7 @@ func TestResolvePlaneMember_StaticConfigWins(t *testing.T) {
 	e.Users = map[string]string{"alice": "plane-uuid-alice"}
 	// If the resolver ever falls through to the email step, this fake
 	// would record a list call; we assert it stays at zero.
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
 		t.Errorf("ListWorkspaceMembers should not be called when static config matches")
 		return nil, nil
 	}
@@ -57,8 +58,8 @@ func TestResolvePlaneMember_StaticConfigWins(t *testing.T) {
 func TestResolvePlaneMember_EmailMatch(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-1", Email: "bob@example.com"},
 			{ID: "plane-uuid-2", Email: "carol@example.com"},
 		}, nil
@@ -76,10 +77,10 @@ func TestResolvePlaneMember_EmailMatch(t *testing.T) {
 func TestResolvePlaneMember_EmailMatchCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
 		// Mixed case on the plane side, all-lowercase on the forge side
 		// — historical Gitea normalises emails to lowercase on signup.
-		return []Member{
+		return []plane.Member{
 			{ID: "plane-uuid-mixed", Email: "Dave.Mixed@Example.COM"},
 		}, nil
 	}
@@ -96,8 +97,8 @@ func TestResolvePlaneMember_EmailMatchCaseInsensitive(t *testing.T) {
 func TestResolvePlaneMember_NoMatch_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{{ID: "x", Email: "elsewhere@example.com"}}, nil
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{{ID: "x", Email: "elsewhere@example.com"}}, nil
 	}
 
 	got, err := e.resolvePlaneMember(context.Background(), "frank", "frank@example.com")
@@ -112,7 +113,7 @@ func TestResolvePlaneMember_NoMatch_ReturnsEmpty(t *testing.T) {
 func TestResolvePlaneMember_EmptyEmail_FallsThrough(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
 		t.Errorf("ListWorkspaceMembers should not be called when forge email is empty")
 		return nil, nil
 	}
@@ -132,7 +133,7 @@ func TestResolvePlaneMember_EmptyEmail_FallsThrough(t *testing.T) {
 func TestResolvePlaneMember_PlaneAPIError_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
 		return nil, errors.New("503 service unavailable")
 	}
 
@@ -148,8 +149,8 @@ func TestResolvePlaneMember_PlaneAPIError_ReturnsEmpty(t *testing.T) {
 func TestResolvePlaneMember_CacheHit_NoSecondCall(t *testing.T) {
 	t.Parallel()
 	e, pc, _ := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-1", Email: "a@example.com"},
 			{ID: "plane-uuid-2", Email: "b@example.com"},
 		}, nil
@@ -171,7 +172,7 @@ func TestResolveForgeUser_InverseConfigWins(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
 	e.Users = map[string]string{"alice": "plane-uuid-alice"}
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
 		t.Errorf("ListWorkspaceMembers should not be called when inverse config matches")
 		return nil, nil
 	}
@@ -192,8 +193,8 @@ func TestResolveForgeUser_InverseConfigWins(t *testing.T) {
 func TestResolveForgeUser_EmailMatch(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-bob", Email: "bob@example.com"},
 		}, nil
 	}
@@ -218,8 +219,8 @@ func TestResolveForgeUser_EmailMatch(t *testing.T) {
 func TestResolveForgeUser_ExactEmailFilter(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-bob", Email: "bob@example.com"},
 		}, nil
 	}
@@ -247,8 +248,8 @@ func TestResolveForgeUser_ExactEmailFilter(t *testing.T) {
 func TestResolveForgeUser_NoMatch_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-ghost", Email: "ghost@example.com"},
 		}, nil
 	}
@@ -271,8 +272,8 @@ func TestResolveForgeUser_UnknownMember_ReturnsEmpty(t *testing.T) {
 	// Resolver is asked about a UUID that isn't in the workspace list —
 	// might be a member of a different workspace, a stale UUID, or a
 	// system actor. Skip the forge search entirely.
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-other", Email: "other@example.com"},
 		}, nil
 	}
@@ -293,8 +294,8 @@ func TestResolveForgeUser_UnknownMember_ReturnsEmpty(t *testing.T) {
 func TestResolveForgeUser_ConcurrentSameEmail_OneSearch(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "plane-uuid-shared", Email: "shared@example.com"},
 		}, nil
 	}
@@ -335,8 +336,8 @@ func TestResolveForgeUser_ConcurrentSameEmail_OneSearch(t *testing.T) {
 func TestResolveForgeUser_ForgeAPIError_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newIdentityEngine(t)
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{{ID: "plane-uuid-x", Email: "x@example.com"}}, nil
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{{ID: "plane-uuid-x", Email: "x@example.com"}}, nil
 	}
 	fc.SearchUsersFunc = func(_ context.Context, _ string) ([]forge.User, error) {
 		return nil, errors.New("502 bad gateway")

@@ -200,6 +200,10 @@ func handleAPI(rec *recorder, store *workItemStore, logger *slog.Logger) http.Ha
 					"total_count": len(fixedStates),
 				}, logger)
 				return
+			case isMembersCollection(r.URL.Path):
+				// Bare array, matching the real Plane v1 contract.
+				writeJSON(w, http.StatusOK, fixedMembers, logger)
+				return
 			case isWorkItemLookup(r.URL.Path):
 				// Workspace-level lookup by identifier-sequence. The stub
 				// returns the most-recently-POSTed work item, ignoring the
@@ -307,6 +311,21 @@ var fixedStates = []map[string]any{
 	{"id": "11111111-0000-0000-0000-000000000001", "name": "Backlog", "group": "backlog", "color": "#888888"},
 	{"id": "11111111-0000-0000-0000-000000000002", "name": "In Progress", "group": "started", "color": "#0066ff"},
 	{"id": "11111111-0000-0000-0000-000000000003", "name": "Done", "group": "completed", "color": "#00aa00"},
+}
+
+// fixedMembers is the stable workspace member list the stub serves on
+// GET /workspaces/{slug}/members/. The pfbadmin@example.com email
+// matches the forge admin user created by seed.sh, so the bridge's
+// v2 identity resolver finds a Plane member to assign forge events to.
+var fixedMembers = []map[string]any{
+	{
+		"id":           "22222222-0000-0000-0000-000000000001",
+		"first_name":   "PFB",
+		"last_name":    "Admin",
+		"email":        "pfbadmin@example.com",
+		"display_name": "pfbadmin",
+		"role":         20,
+	},
 }
 
 // workItemStore is the stub's tiny in-memory state. It tracks work items
@@ -432,6 +451,10 @@ func isKnownAPIPath(path string) bool {
 		// .../work-items/{ident-seq}
 		return len(parts) == 7
 	}
+	if parts[5] == "members" {
+		// .../members  (workspace-level)
+		return len(parts) == 6
+	}
 	if parts[5] != "projects" || len(parts) < 8 {
 		return false
 	}
@@ -456,6 +479,14 @@ func isWorkItemLookup(path string) bool {
 	p := strings.TrimSuffix(path, "/")
 	parts := strings.Split(p, "/")
 	return len(parts) == 7 && parts[5] == "work-items"
+}
+
+// isMembersCollection reports whether path is the workspace-level
+// /members collection (no member-ID suffix).
+func isMembersCollection(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	parts := strings.Split(p, "/")
+	return len(parts) == 6 && parts[5] == "members"
 }
 
 // isLabelsCollection reports whether path is the collection endpoint

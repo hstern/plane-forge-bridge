@@ -47,10 +47,10 @@ type PlaneClient interface {
 	DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
 	// ListWorkspaceMembers powers the v2 identity resolver. Returns the
 	// workspace-scoped member list (small enough that fetching all is
-	// cheaper than per-email queries). The sync-local Member type is
+	// cheaper than per-email queries). The sync-local plane.Member type is
 	// defined in identity.go; the production *plane.Client returns its
 	// sibling-package equivalent and the wiring layer adapts.
-	ListWorkspaceMembers(ctx context.Context) ([]Member, error)
+	ListWorkspaceMembers(ctx context.Context) ([]plane.Member, error)
 }
 
 // ForgeClient is the subset of the forge.Client REST API the sync engine

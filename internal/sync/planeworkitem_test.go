@@ -134,8 +134,8 @@ func TestHandlePlaneWorkItem_AssigneeResolvedFromForgeEmail(t *testing.T) {
 	t.Parallel()
 	e, pc, fc := newPlaneWorkItemTestEngine(t)
 
-	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]Member, error) {
-		return []Member{
+	pc.ListWorkspaceMembersFunc = func(_ context.Context) ([]plane.Member, error) {
+		return []plane.Member{
 			{ID: "actor-1", Email: "bob@example.com"},
 		}, nil
 	}

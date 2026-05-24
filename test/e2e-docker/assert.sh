@@ -75,6 +75,21 @@ if [ -z "$name" ]; then
 fi
 log "issue title carried through: name=$name"
 
+# Optional: assert v2 identity resolution put the matched Plane member
+# UUID into the create POST's assignees field.
+if [ "${ASSERT_ASSIGNEE:-}" != "" ]; then
+  expected="${ASSERT_ASSIGNEE}"
+  match=$(printf '%s' "$found_json" | jq -c --arg a "$expected" '
+    .body.assignees // [] | map(select(. == $a)) | first
+  ')
+  if [ -z "$match" ] || [ "$match" = "null" ]; then
+    log "ERROR: expected assignee UUID $expected not in recorded create"
+    log "actual assignees: $(printf '%s' "$found_json" | jq -c '.body.assignees // []')"
+    exit 1
+  fi
+  log "v2 identity resolved: assignees carries $expected"
+fi
+
 # Optional: assert that the create POST carries plane label UUIDs and that
 # at least one POST to /labels/ happened (the bridge's auto-create path).
 if [ "${ASSERT_LABELS:-0}" = "1" ]; then

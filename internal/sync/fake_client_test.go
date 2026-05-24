@@ -36,7 +36,7 @@ type fakeClient struct {
 	CreateCommentFunc         func(ctx context.Context, projectID, issueID string, req plane.CreateCommentRequest) (*plane.Comment, error)
 	UpdateCommentFunc         func(ctx context.Context, projectID, issueID, commentID string, req plane.UpdateCommentRequest) (*plane.Comment, error)
 	DeleteCommentFunc         func(ctx context.Context, projectID, issueID, commentID string) error
-	ListWorkspaceMembersFunc  func(ctx context.Context) ([]Member, error)
+	ListWorkspaceMembersFunc  func(ctx context.Context) ([]plane.Member, error)
 
 	Gets                      []getCall
 	GetsByID                  []getByIDCall
@@ -249,7 +249,7 @@ func (f *fakeClient) DeleteComment(ctx context.Context, projectID, issueID, comm
 	return nil
 }
 
-func (f *fakeClient) ListWorkspaceMembers(ctx context.Context) ([]Member, error) {
+func (f *fakeClient) ListWorkspaceMembers(ctx context.Context) ([]plane.Member, error) {
 	f.mu.Lock()
 	f.ListWorkspaceMembersCalls++
 	fn := f.ListWorkspaceMembersFunc

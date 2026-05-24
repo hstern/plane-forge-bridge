@@ -5,32 +5,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hstern/plane-forge-bridge/internal/plane"
 )
 
 // identityCacheTTL bounds how long an identity-resolution cache entry is
 // kept before the engine refetches. Matches stateCacheTTL / labelCacheTTL
 // so operators have one mental model for cache freshness.
 const identityCacheTTL = 5 * time.Minute
-
-// Member is the sync-local view of a Plane workspace member, used by the
-// v2 identity resolver. The production *plane.Client is expected to
-// provide a `ListWorkspaceMembers(ctx) ([]plane.Member, error)` method
-// returning a sibling-package type with the same field set; the wiring
-// layer in internal/server bridges between the two so this package can
-// land independently of the sibling commit. See README "v2 identity
-// resolution".
-//
-// Only Email and ID are load-bearing on the v2 path; the rest are kept
-// so callers (and tests) can populate the struct from a real Plane
-// payload without losing fields.
-type Member struct {
-	ID          string
-	Email       string
-	DisplayName string
-	FirstName   string
-	LastName    string
-	Role        string
-}
 
 // identityCache is the per-engine cache backing v2 identity resolution.
 // Two surfaces are cached independently:
@@ -50,7 +32,7 @@ type Member struct {
 // thundering-herd guarantee of stateCache and labelCache.
 type identityCache struct {
 	planeMu            sync.Mutex
-	planeMembers       []Member
+	planeMembers       []plane.Member
 	planeMembersExpiry time.Time
 
 	forgeMu      sync.Mutex
@@ -160,7 +142,7 @@ func (e *Engine) resolveForgeUser(ctx context.Context, planeMemberID string) (st
 // from the PlaneClient if the cache is empty or stale. Refresh is
 // serialised on the section mutex so concurrent resolver calls coalesce
 // onto a single upstream call.
-func (e *Engine) listPlaneMembers(ctx context.Context) ([]Member, error) {
+func (e *Engine) listPlaneMembers(ctx context.Context) ([]plane.Member, error) {
 	e.identityCache.planeMu.Lock()
 	defer e.identityCache.planeMu.Unlock()
 
