@@ -96,6 +96,7 @@ type Event struct {
 
 // Sentinel errors. Mirrors internal/forge.
 var (
+	ErrEmptySecret        = errors.New("plane: empty secret")
 	ErrMissingSignature   = errors.New("plane: missing signature header")
 	ErrInvalidSignature   = errors.New("plane: invalid signature")
 	ErrMissingEventHeader = errors.New("plane: missing event header")

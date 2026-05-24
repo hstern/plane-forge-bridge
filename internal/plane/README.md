@@ -109,17 +109,27 @@ func (c *Client) UpdateComment(ctx context.Context, projectID, issueID, commentI
 func (c *Client) DeleteComment(ctx context.Context, projectID, issueID, commentID string) error
 ```
 
-Sentinel errors:
+Sentinel errors (webhook side):
 
+- `ErrEmptySecret` — `VerifySignature` rejects an empty secret rather
+  than computing an HMAC against an empty key (which any attacker who
+  knows the body could trivially reproduce). Mirrors
+  `forge.ErrEmptySecret`.
 - `ErrMissingSignature`
-- `ErrInvalidSignature`
+- `ErrInvalidSignature` — covers wrong MAC, malformed-hex header, and
+  length mismatch. `VerifySignature` hex-decodes the header before the
+  constant-time compare on raw MAC bytes; a malformed-hex header
+  surfaces here rather than as a "wrong MAC" indistinguishable failure.
 - `ErrMissingEventHeader`
 - `ErrUnsupportedEvent`
 - `ErrMalformedPayload`
-- `ErrNotFound` — returned by `GetIssueByExternalRef` when no work item
-  matches the `(source, externalID)` pair. This is the normal "we have
-  not yet mirrored this forge issue" case; callers should treat it as a
-  signal to create rather than as a failure.
+
+Sentinel errors (REST client side):
+
+- `ErrNotFound` — returned by `GetIssueByExternalRef` and
+  `GetIssueBySequenceID` when no work item matches. This is the normal
+  "we have not yet mirrored this forge issue" case; callers should
+  treat it as a signal to create rather than as a failure.
 
 ## Client (outbound REST)
 

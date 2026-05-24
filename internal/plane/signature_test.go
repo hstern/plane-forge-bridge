@@ -39,6 +39,13 @@ func TestVerifySignature(t *testing.T) {
 			wantErr: nil,
 		},
 		{
+			name:    "empty secret rejected",
+			secret:  "",
+			sig:     good,
+			body:    body,
+			wantErr: ErrEmptySecret,
+		},
+		{
 			name:    "missing header",
 			secret:  testSecret,
 			sig:     "",

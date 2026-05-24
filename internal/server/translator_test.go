@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -400,5 +401,55 @@ func TestPlaneWebhook_WorkItemTranslateError_500(t *testing.T) {
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestForgeWebhook_MalformedEventTranslateErr_422(t *testing.T) {
+	ft := &fakeTranslator{
+		respondForgeIssue: func(_ *forge.Event) (*pfbsync.Outcome, error) {
+			// Wrap with sync.ErrMalformedEvent the same way the engine does.
+			return nil, fmt.Errorf("%w: issue.opened payload has no issue", pfbsync.ErrMalformedEvent)
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../forge/testdata/issues_opened.json")
+	sig := sign(testForgeSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/forge/webhook", bytes.NewReader(body))
+	req.Header.Set(forge.HeaderSignature, sig)
+	req.Header.Set(forge.HeaderEvent, "issues")
+	req.Header.Set(forge.HeaderDelivery, "delivery-malformed")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnprocessableEntity)
+	}
+	// Forge sees 4xx and stops retrying — verify the response body carries
+	// a distinguishable message so an operator inspecting the failed
+	// delivery in the forge admin UI knows it was a bad payload, not a
+	// 500.
+	if !bytes.Contains(rr.Body.Bytes(), []byte("malformed")) {
+		t.Errorf("body should mention 'malformed', got %q", rr.Body.String())
+	}
+}
+
+func TestPlaneWebhook_MalformedEventTranslateErr_422(t *testing.T) {
+	ft := &fakeTranslator{
+		respondPlaneWorkItem: func(_ *plane.Event) (*pfbsync.Outcome, error) {
+			return nil, fmt.Errorf("%w: work_item.created payload has no work_item", pfbsync.ErrMalformedEvent)
+		},
+	}
+	s := newTestServerWithTranslator(t, ft)
+	body := loadFixture(t, "../plane/testdata/work_item_created.json")
+	sig := sign(testPlaneSecret, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/plane/webhook", bytes.NewReader(body))
+	req.Header.Set(plane.HeaderSignature, sig)
+	req.Header.Set(plane.HeaderEvent, "issue")
+	req.Header.Set(plane.HeaderDelivery, "delivery-malformed-plane")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnprocessableEntity)
 	}
 }

@@ -28,6 +28,20 @@ import (
 	"github.com/hstern/plane-forge-bridge/internal/plane"
 )
 
+// ErrMalformedEvent is returned by the Handle* methods when an HMAC-verified
+// webhook event is structurally invalid — e.g. an issue.opened event with no
+// issue payload, a plane work_item.created with no data object, an
+// external_source/external_id pair that can't be parsed.
+//
+// The server uses this to distinguish bad-input (HTTP 422 — well-formed JSON,
+// malformed semantics) from transient upstream errors (HTTP 500 — should
+// retry). Without it, every shape error was a 500, and the forge/Plane side
+// would retry the same malformed delivery indefinitely.
+//
+// Programmer bugs (nil event, ForgeClient not configured) are NOT wrapped
+// with this sentinel — those are 500-class.
+var ErrMalformedEvent = errors.New("sync: malformed event")
+
 // PlaneClient is the subset of the plane.Client REST API this package
 // depends on. Declaring the interface here (rather than in internal/plane)
 // lets tests substitute a hand-written fake without dragging the HTTP
@@ -233,7 +247,7 @@ func externalRef(repo forge.Repository, issue forge.Issue) (source, id string) {
 func parseExternalRef(source, externalID string) (owner, repo string, number int64, err error) {
 	const prefix = "forge:"
 	if source == "" {
-		return "", "", 0, errors.New("sync: empty external_source")
+		return "", "", 0, fmt.Errorf("%w: empty external_source", ErrMalformedEvent)
 	}
 	if !strings.HasPrefix(source, prefix) {
 		return "", "", 0, fmt.Errorf("sync: external_source %q missing %q prefix", source, prefix)
@@ -245,7 +259,7 @@ func parseExternalRef(source, externalID string) (owner, repo string, number int
 	}
 	owner, repo = o, r
 	if externalID == "" {
-		return "", "", 0, errors.New("sync: empty external_id")
+		return "", "", 0, fmt.Errorf("%w: empty external_id", ErrMalformedEvent)
 	}
 	n, perr := strconv.ParseInt(externalID, 10, 64)
 	if perr != nil {
@@ -309,7 +323,7 @@ func (e *Engine) HandleForgeIssue(ctx context.Context, evt *forge.Event) (*Outco
 // duplicate). If absent, it creates.
 func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mapping.Link) (*Outcome, error) {
 	if evt.Issue == nil {
-		return nil, errors.New("sync: IssueOpened with nil Issue")
+		return nil, fmt.Errorf("%w: issue.opened payload has no issue", ErrMalformedEvent)
 	}
 	source, id := externalRef(evt.Repo, *evt.Issue)
 
@@ -376,7 +390,7 @@ func (e *Engine) handleOpened(ctx context.Context, evt *forge.Event, link *mappi
 // Better to surface the gap in logs than paper over it.
 func (e *Engine) handleEdited(ctx context.Context, evt *forge.Event, link *mapping.Link) (*Outcome, error) {
 	if evt.Issue == nil {
-		return nil, errors.New("sync: IssueEdited with nil Issue")
+		return nil, fmt.Errorf("%w: issue.edited payload has no issue", ErrMalformedEvent)
 	}
 	source, id := externalRef(evt.Repo, *evt.Issue)
 
@@ -442,7 +456,7 @@ func (e *Engine) handleEdited(ctx context.Context, evt *forge.Event, link *mappi
 // guarantee).
 func (e *Engine) handleStateChange(ctx context.Context, evt *forge.Event, link *mapping.Link, forgeState string) (*Outcome, error) {
 	if evt.Issue == nil {
-		return nil, fmt.Errorf("sync: %s with nil Issue", evt.Kind)
+		return nil, fmt.Errorf("%w: %s payload has no issue", ErrMalformedEvent, evt.Kind)
 	}
 	source, id := externalRef(evt.Repo, *evt.Issue)
 
@@ -593,10 +607,10 @@ func (e *Engine) HandleForgeComment(ctx context.Context, evt *forge.Event) (*Out
 // forge issue via the external ref, then posts the marker-wrapped comment.
 func (e *Engine) handleForgeCommentCreated(ctx context.Context, evt *forge.Event, link *mapping.Link) (*Outcome, error) {
 	if evt.Issue == nil {
-		return nil, errors.New("sync: IssueCommentCreated with nil Issue")
+		return nil, fmt.Errorf("%w: issue_comment.created payload has no issue", ErrMalformedEvent)
 	}
 	if evt.Comment == nil {
-		return nil, errors.New("sync: IssueCommentCreated with nil Comment")
+		return nil, fmt.Errorf("%w: issue_comment.created payload has no comment", ErrMalformedEvent)
 	}
 	source, id := externalRef(evt.Repo, *evt.Issue)
 
@@ -681,7 +695,7 @@ func (e *Engine) HandlePlaneComment(ctx context.Context, evt *plane.Event) (*Out
 // marker-wrapped comment.
 func (e *Engine) handlePlaneCommentCreated(ctx context.Context, evt *plane.Event) (*Outcome, error) {
 	if evt.Comment == nil {
-		return nil, errors.New("sync: CommentCreated with nil Comment")
+		return nil, fmt.Errorf("%w: comment.created payload has no comment", ErrMalformedEvent)
 	}
 	if e.ForgeClient == nil {
 		return nil, errors.New("sync: ForgeClient not configured")
@@ -805,7 +819,7 @@ func (e *Engine) HandleForgePullRequest(ctx context.Context, evt *forge.Event) (
 	}
 
 	if evt.PullRequest == nil {
-		return nil, fmt.Errorf("sync: %s with nil PullRequest", evt.Kind)
+		return nil, fmt.Errorf("%w: %s payload has no pull_request", ErrMalformedEvent, evt.Kind)
 	}
 
 	seq, ok := parsePRRef(
