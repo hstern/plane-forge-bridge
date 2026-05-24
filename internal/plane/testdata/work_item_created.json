@@ -1,34 +1,60 @@
 {
   "event": "issue",
   "action": "created",
-  "webhook_id": "11111111-1111-1111-1111-111111111111",
-  "workspace_id": "22222222-2222-2222-2222-222222222222",
+  "webhook_id": "3eda452e-8761-416d-86e0-02962a11a06c",
+  "workspace_id": "f0ebd07e-6540-4876-8b07-cdc15659e2b1",
   "data": {
-    "id": "33333333-3333-3333-3333-333333333333",
-    "name": "Investigate flaky CI runner",
-    "description_html": "<p>Race detector trips intermittently on the forge package.</p>",
+    "id": "2d048fe5-c172-42f2-ab92-d5d26f4d7e96",
+    "labels": [],
+    "assignees": [],
     "state": {
-      "id": "44444444-4444-4444-4444-444444444444",
+      "id": "e931d389-7080-4612-9f6a-05b535ac3afa",
       "name": "Backlog",
       "color": "#60646C",
       "group": "backlog"
     },
-    "priority": "high",
-    "assignees": [
-      { "id": "55555555-5555-5555-5555-555555555555", "display_name": "Alice" }
-    ],
-    "labels": [
-      { "id": "66666666-6666-6666-6666-666666666666", "name": "bug", "color": "#ff0000" }
-    ],
-    "project": "77777777-7777-7777-7777-777777777777",
-    "workspace": "22222222-2222-2222-2222-222222222222",
-    "created_by": "88888888-8888-8888-8888-888888888888",
-    "sequence_id": 42
+    "description": {},
+    "created_at": "2026-05-24T03:44:46.654905Z",
+    "updated_at": "2026-05-24T03:44:46.591386Z",
+    "deleted_at": null,
+    "point": null,
+    "name": "pfb-25 capture sample",
+    "description_json": {},
+    "description_html": "<p>sample</p>",
+    "description_stripped": "sample",
+    "description_binary": null,
+    "priority": "none",
+    "start_date": null,
+    "target_date": null,
+    "sequence_id": 35,
+    "sort_order": 255535.0,
+    "completed_at": null,
+    "archived_at": null,
+    "is_draft": false,
+    "external_source": null,
+    "external_id": null,
+    "created_by": "00a3fa45-f4f8-4a19-b7cf-f86a648f717d",
+    "updated_by": null,
+    "project": "ede7e196-e408-47b6-883b-d2188f101dd0",
+    "workspace": "f0ebd07e-6540-4876-8b07-cdc15659e2b1",
+    "parent": null,
+    "estimate_point": null,
+    "type": null
   },
   "activity": {
+    "field": null,
+    "new_value": null,
+    "old_value": null,
     "actor": {
-      "id": "88888888-8888-8888-8888-888888888888",
-      "display_name": "Henry"
-    }
+      "id": "00a3fa45-f4f8-4a19-b7cf-f86a648f717d",
+      "first_name": "Henry",
+      "last_name": "Stern",
+      "email": "henry@stern.ca",
+      "avatar": "",
+      "avatar_url": null,
+      "display_name": "henry"
+    },
+    "old_identifier": null,
+    "new_identifier": null
   }
 }
