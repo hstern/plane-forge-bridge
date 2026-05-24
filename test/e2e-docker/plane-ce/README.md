@@ -28,7 +28,8 @@ volumes — none are needed for headless REST + webhook coverage.
 
 ## What CI does
 
-The `e2e-real-plane` job in `.github/workflows/ci.yaml`:
+The `plane-1.3` leg of the `e2e` matrix in `.github/workflows/ci.yaml`
+(alongside `e2e-forgejo-15` and `e2e-gitea-1.22`):
 
 1. Brings up this stack via `run.sh up` (~90s on a cold cache)
 2. Seeds an admin user + workspace + project + API token via direct
@@ -47,8 +48,8 @@ The `e2e-real-plane` job in `.github/workflows/ci.yaml`:
    the path PFB-25 broke in production.
 7. Tears down on success or failure (`if: always()`).
 
-The `publish` job depends on `e2e-real-plane` succeeding, alongside
-`lint` and `e2e-docker`.
+The `publish` job depends on the entire `e2e` matrix succeeding,
+alongside `lint`.
 
 ## Why these versions
 

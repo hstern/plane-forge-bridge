@@ -112,24 +112,34 @@ jobs:
   # container name. Seeds a repo + webhook, creates an issue via REST, and
   # asserts the bridge translated it into a recorded POST against
   # plane-stub with the loop-break marker present.
-  e2e-docker:
-    name: e2e-docker (${{ matrix.forge.name }})
+  e2e:
+    name: e2e-${{ matrix.name }}
     needs: build-image
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        forge:
-          - name: forgejo
-            image: codeberg.org/forgejo/forgejo:15
+        include:
+          - name: forgejo-15
             flavor: forgejo
-          - name: gitea
-            image: gitea/gitea:1.22
+            forge_image: codeberg.org/forgejo/forgejo:15
+          - name: gitea-1.22
             flavor: gitea
+            forge_image: gitea/gitea:1.22
+          - name: plane-1.3
+            flavor: plane
+            # The plane leg doesn't use the forge service container,
+            # but GHA `services:` can't be conditionally defined per
+            # matrix entry — every entry must specify a value. Use the
+            # same forgejo image the forgejo-15 leg uses so the layer
+            # cache is shared; the bridge config for the plane leg
+            # points at http://forge.invalid so this container is
+            # never reached.
+            forge_image: codeberg.org/forgejo/forgejo:15
     services:
       forge:
-        image: ${{ matrix.forge.image }}
+        image: ${{ matrix.forge_image }}
         ports:
           - 3000:3000
         env:
@@ -176,13 +186,14 @@ jobs:
 
       - name: Identify forge service container
         id: forge
+        if: matrix.flavor != 'plane'
         # The forge runs as a GitHub Actions `services:` container; the
         # bridge and plane-stub need to join its auto-generated network so
         # the forge can address the bridge by container name when posting
         # webhooks.
         run: |
           set -euo pipefail
-          cid=$(docker ps --filter "ancestor=${{ matrix.forge.image }}" -q | head -n1)
+          cid=$(docker ps --filter "ancestor=${{ matrix.forge_image }}" -q | head -n1)
           if [ -z "$cid" ]; then
             echo "ERROR: forge service container not found"
             docker ps -a
@@ -202,6 +213,7 @@ jobs:
           echo "ip=$ip"       >> "$GITHUB_OUTPUT"
 
       - name: Start plane-stub on the forge network
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           docker pull '${{ needs.build-image.outputs.stub_image }}'
@@ -216,6 +228,7 @@ jobs:
           curl -fsS http://localhost:8081/_/healthz
 
       - name: Write bridge config
+        if: matrix.flavor != 'plane'
         env:
           # Address forge by IP rather than container DNS name — docker DNS
           # over the auto-generated underscored hostnames has been flaky.
@@ -274,6 +287,7 @@ jobs:
           exit 1
 
       - name: Launch bridge on the forge network
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           # We set PFB_FORGE_TOKEN after Forgejo is seeded (next step) and
@@ -299,6 +313,7 @@ jobs:
           curl -fsS http://127.0.0.1:8080/healthz
 
       - name: Smoke — webhook 202 on valid signature (direct POST)
+        if: matrix.flavor != 'plane'
         env:
           FORGE_SECRET: ${{ env.PFB_FORGE_WEBHOOK_SECRET }}
         run: |
@@ -316,6 +331,7 @@ jobs:
           [ "$status" = "202" ] || { echo "ERROR: expected 202, got $status"; exit 1; }
 
       - name: Smoke — webhook 401 on invalid signature (direct POST)
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           body=$(cat internal/forge/testdata/issues_opened.json)
@@ -330,9 +346,10 @@ jobs:
 
       - name: Seed forge with org + repo + webhook
         id: seed
+        if: matrix.flavor != 'plane'
         env:
           FORGE_CONTAINER: ${{ steps.forge.outputs.name }}
-          FORGE_FLAVOR: ${{ matrix.forge.flavor }}
+          FORGE_FLAVOR: ${{ matrix.flavor }}
           BRIDGE_WEBHOOK_URL: http://bridge:8080/forge/webhook
         run: |
           set -euo pipefail
@@ -363,6 +380,7 @@ jobs:
           echo "FORGE_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Diagnostic — what does forge expose for the admin user
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           echo "--- /users/$FORGE_ADMIN_USER ---"
@@ -374,6 +392,7 @@ jobs:
 
       - name: Create a forge label for the e2e issue
         id: label
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           http_code=$(curl -sS -o /tmp/label.json -w '%{http_code}' \
@@ -390,6 +409,7 @@ jobs:
 
       - name: Create an issue via forge REST API
         id: issue
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           # Don't use -f so we get the response body on non-2xx for diagnosis.
@@ -416,6 +436,7 @@ jobs:
           echo "number=$issue_number" >> "$GITHUB_OUTPUT"
 
       - name: Post a comment on the issue via forge REST API
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           http_code=$(curl -sS -o /tmp/comment.json -w '%{http_code}' \
@@ -429,6 +450,7 @@ jobs:
           [ "$http_code" = "201" ] || { echo "ERROR: comment create returned $http_code"; exit 1; }
 
       - name: Assert plane-stub recorded the issue + label + comment + identity
+        if: matrix.flavor != 'plane'
         env:
           PLANE_STUB_URL: http://localhost:8081
           FORGE_ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
@@ -446,6 +468,7 @@ jobs:
           bash test/e2e-docker/assert.sh
 
       - name: Create a branch with a file change for the PR
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           # Get the main branch SHA so we can branch from it.
@@ -469,6 +492,7 @@ jobs:
 
       - name: Open a PR with a [PFB-1] ref
         id: pr
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           http_code=$(curl -sS -o /tmp/pr.json -w '%{http_code}' \
@@ -483,6 +507,7 @@ jobs:
           echo "number=$(jq -r .number /tmp/pr.json)" >> "$GITHUB_OUTPUT"
 
       - name: Assert plane-stub recorded a state PATCH for the PR open
+        if: matrix.flavor != 'plane'
         env:
           PLANE_STUB_URL: http://localhost:8081
           # PFB In Progress UUID from plane-stub's fixedStates list.
@@ -512,6 +537,7 @@ jobs:
           exit 1
 
       - name: Plane→forge — POST a synthetic plane work_item.created webhook
+        if: matrix.flavor != 'plane'
         env:
           PLANE_SECRET: ${{ env.PFB_PLANE_WEBHOOK_SECRET }}
         run: |
@@ -558,6 +584,7 @@ jobs:
           [ "$status" = "202" ] || { echo "ERROR: expected 202, got $status"; exit 1; }
 
       - name: Assert forge now has an issue with the plane-ref marker
+        if: matrix.flavor != 'plane'
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
@@ -588,78 +615,17 @@ jobs:
           printf '%s' "$issues" | jq .
           exit 1
 
-      - name: Capture diagnostics on failure
-        if: failure()
-        run: |
-          echo "===== bridge container log ====="; docker logs bridge 2>&1 | tail -200 || true
-          echo "===== plane-stub container log ====="; docker logs plane-stub 2>&1 | tail -200 || true
-          echo "===== forge container log ====="; docker logs '${{ steps.forge.outputs.name }}' 2>&1 | tail -200 || true
-          echo "===== recorded plane-stub calls ====="; curl -fsS http://localhost:8081/_/recorded | jq . || true
-          echo "===== config.yaml ====="; cat config.yaml || true
+      # ---- plane-1.3 leg (real Plane CE round-trip) ----
+      # The plane leg uses a separate compose-managed stack (Plane CE +
+      # postgres + redis + rabbitmq + minio) instead of the
+      # services:forge container above. The forge service container
+      # still starts (services: can't be conditional per matrix entry)
+      # but the bridge config below points at http://forge.invalid so
+      # it's never reached.
 
-      - name: Upload diagnostics
-        if: always()
-        run: |
-          mkdir -p artifacts
-          docker logs bridge      > artifacts/bridge.log     2>&1 || true
-          docker logs plane-stub  > artifacts/plane-stub.log 2>&1 || true
-          docker logs '${{ steps.forge.outputs.name }}' > artifacts/forge.log 2>&1 || true
-          curl -fsS http://localhost:8081/_/recorded > artifacts/recorded.json 2>/dev/null || true
-          cp config.yaml artifacts/ || true
-
-      - name: Upload diagnostics artifact
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: e2e-docker-${{ matrix.forge.name }}-logs
-          path: artifacts/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Cleanup
-        if: always()
-        run: |
-          set +e
-          docker rm -f bridge 2>/dev/null
-          docker rm -f plane-stub 2>/dev/null
-
-  # Real-Plane round-trip. Brings up a minimum Plane CE v1.3.1 stack
-  # (api+worker+deps, no frontends), seeds an admin user + workspace +
-  # project + API token via direct Django ORM (Plane CE has no headless
-  # signup flow), then runs the **bridge image built by build-image**
-  # against that real Plane and POSTs a synthetic forge issue webhook
-  # at it. Asserts the bridge translated the webhook into a real work
-  # item in real Plane (looked up via external_source/_id, the same
-  # round-trip the production deploy relies on).
-  #
-  # Catches the wire-shape drift class of bug that produced PFB-22,
-  # PFB-24, and PFB-25 — those all passed CI because the e2e-docker
-  # plane-stub happily agreed with the bridge's synthetic testdata.
-  #
-  # Separate from the e2e-docker matrix: Plane CE boot is ~90s on a
-  # cold cache, and the wire shape doesn't vary by forge flavor, so
-  # running once is enough.
-  e2e-real-plane:
-    name: e2e-real-plane
-    needs: build-image
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 20
-    env:
-      PFB_FORGE_WEBHOOK_SECRET: ci-forge-secret-${{ github.run_id }}
-      PFB_PLANE_API_KEY: ci-plane-token-${{ github.run_id }}
-      PFB_PLANE_WEBHOOK_SECRET: ci-plane-secret-${{ github.run_id }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Bring up Plane CE v1.3.1 + seed
-        id: seed
+      - name: Bring up Plane CE v1.3.1 + seed (plane leg)
+        if: matrix.flavor == 'plane'
+        id: seed-plane
         run: |
           set -euo pipefail
           seed_json=$(bash test/e2e-docker/plane-ce/run.sh up | tail -n1)
@@ -668,38 +634,18 @@ jobs:
           project_id=$(echo "$seed_json" | jq -r '.project_id')
           workspace_slug=$(echo "$seed_json" | jq -r '.workspace_slug')
           echo "::add-mask::$token"
-          # Override the run-id-derived API key with the actual seeded token
-          # (the seed honours the env hint but we re-export to be sure).
+          # Override the run-id-derived API key with the actual seeded token.
           echo "PFB_PLANE_API_KEY=$token" >> "$GITHUB_ENV"
           echo "PFB_PLANE_WORKSPACE_SLUG=$workspace_slug" >> "$GITHUB_ENV"
           echo "PFB_PLANE_PROJECT_ID=$project_id" >> "$GITHUB_ENV"
 
-      - name: Pull bridge image (with retry against ghcr transient denies)
-        env:
-          IMAGE: ${{ needs.build-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # ghcr.io intermittently returns "denied: denied" on freshly-pushed
-          # multi-arch manifests for a few seconds after the push. Re-login
-          # and retry up to 6 times with backoff before giving up.
-          for i in 1 2 3 4 5 6; do
-            if docker pull "$IMAGE"; then
-              echo "pulled after $i attempt(s)"; exit 0
-            fi
-            echo "pull failed; re-authenticating and retrying in $((i*5))s"
-            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io \
-              -u '${{ github.actor }}' --password-stdin
-            sleep $((i*5))
-          done
-          echo "ERROR: docker pull never succeeded"; exit 1
-
-      - name: Write bridge config pointing at real Plane
+      - name: Write bridge config pointing at real Plane (plane leg)
+        if: matrix.flavor == 'plane'
         run: |
           set -euo pipefail
           # The bridge joins the pfb-e2e-plane-ce network (the one the
           # compose creates) so it can address plane-api by service name.
-          # /api/v1 prefix is part of base_url (matches config.example.yaml).
-          cat > /tmp/pfb-config.yaml <<YAML
+          cat > /tmp/pfb-plane-config.yaml <<YAML
           listen: "0.0.0.0:8080"
           log_level: debug
           forge:
@@ -731,15 +677,19 @@ jobs:
           users: {}
           YAML
 
-      - name: Launch bridge on the plane-ce network
+      - name: Launch bridge on the plane-ce network (plane leg)
+        if: matrix.flavor == 'plane'
         env:
           IMAGE: ${{ needs.build-image.outputs.image }}
         run: |
           set -euo pipefail
+          # The forge service container is bound on host port 8080 nowhere,
+          # but the bridge sibling container would be — use a different host
+          # port to avoid any clash with the unused forge service container.
           docker run -d --name pfb-bridge \
             --network pfb-e2e-plane-ce \
             -p 8080:8080 \
-            -v /tmp/pfb-config.yaml:/etc/pfb/config.yaml:ro \
+            -v /tmp/pfb-plane-config.yaml:/etc/pfb/config.yaml:ro \
             -e PFB_FORGE_TOKEN=placeholder \
             -e PFB_FORGE_WEBHOOK_SECRET="$PFB_FORGE_WEBHOOK_SECRET" \
             -e PFB_PLANE_API_KEY="$PFB_PLANE_API_KEY" \
@@ -754,7 +704,8 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8080/healthz
 
-      - name: POST synthetic forge issue webhook
+      - name: POST synthetic forge issue webhook (plane leg)
+        if: matrix.flavor == 'plane'
         run: |
           set -euo pipefail
           body=$(cat internal/forge/testdata/issues_opened.json)
@@ -764,13 +715,14 @@ jobs:
             -X POST http://127.0.0.1:8080/forge/webhook \
             -H "X-Gitea-Signature: $sig" \
             -H "X-Gitea-Event: issues" \
-            -H "X-Gitea-Delivery: e2e-real-plane-${{ github.run_id }}" \
+            -H "X-Gitea-Delivery: e2e-plane-${{ github.run_id }}" \
             -H 'Content-Type: application/json' \
             --data-binary "$body")
           echo "status=$status body=$(cat /tmp/resp)"
           [ "$status" = "202" ] || { echo "ERROR: bridge returned $status"; exit 1; }
 
-      - name: Assert real Plane has the mirrored work item
+      - name: Assert real Plane has the mirrored work item (plane leg)
+        if: matrix.flavor == 'plane'
         run: |
           set -euo pipefail
           # The bridge stamps external_source="forge:acme/widget" and
@@ -799,32 +751,72 @@ jobs:
           docker logs pfb-bridge --tail=80 || true
           exit 1
 
-      - name: Bridge logs (always)
-        if: always()
-        run: docker logs pfb-bridge --tail=120 || true
+      # ---- shared diagnostics + cleanup ----
 
-      - name: Plane logs (always)
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          if [ '${{ matrix.flavor }}' = 'plane' ]; then
+            echo "===== pfb-bridge container log ====="; docker logs pfb-bridge 2>&1 | tail -200 || true
+            echo "===== plane-api ====="; docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml logs --tail=100 plane-api || true
+            echo "===== plane-worker ====="; docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml logs --tail=100 plane-worker || true
+            echo "===== pfb-plane-config.yaml ====="; cat /tmp/pfb-plane-config.yaml || true
+          else
+            echo "===== bridge container log ====="; docker logs bridge 2>&1 | tail -200 || true
+            echo "===== plane-stub container log ====="; docker logs plane-stub 2>&1 | tail -200 || true
+            echo "===== forge container log ====="; docker logs '${{ steps.forge.outputs.name }}' 2>&1 | tail -200 || true
+            echo "===== recorded plane-stub calls ====="; curl -fsS http://localhost:8081/_/recorded | jq . || true
+            echo "===== config.yaml ====="; cat config.yaml || true
+          fi
+
+      - name: Upload diagnostics
         if: always()
         run: |
-          docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml \
-            logs --tail=80 plane-api plane-worker || true
+          set +e
+          mkdir -p artifacts
+          if [ '${{ matrix.flavor }}' = 'plane' ]; then
+            docker logs pfb-bridge > artifacts/bridge.log 2>&1
+            docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml \
+              logs --no-color plane-api plane-worker plane-beat-worker > artifacts/plane-ce.log 2>&1
+            cp /tmp/pfb-plane-config.yaml artifacts/config.yaml
+          else
+            docker logs bridge      > artifacts/bridge.log     2>&1
+            docker logs plane-stub  > artifacts/plane-stub.log 2>&1
+            docker logs '${{ steps.forge.outputs.name }}' > artifacts/forge.log 2>&1
+            curl -fsS http://localhost:8081/_/recorded > artifacts/recorded.json 2>/dev/null
+            cp config.yaml artifacts/
+          fi
 
-      - name: Tear down
+      - name: Upload diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ matrix.name }}-logs
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
         if: always()
         run: |
-          docker rm -f pfb-bridge 2>/dev/null || true
-          bash test/e2e-docker/plane-ce/run.sh down
+          set +e
+          if [ '${{ matrix.flavor }}' = 'plane' ]; then
+            docker rm -f pfb-bridge 2>/dev/null
+            bash test/e2e-docker/plane-ce/run.sh down
+          else
+            docker rm -f bridge 2>/dev/null
+            docker rm -f plane-stub 2>/dev/null
+          fi
 
   # Publish on push to main (rolling `:latest`) and on v* tag pushes (semver
   # tags). Never on PRs. Retag the build-image artifact rather than rebuild —
-  # the bytes we publish are the bytes e2e-docker just validated.
+  # the bytes we publish are the bytes the e2e matrix just validated.
   publish:
     name: publish
-    needs: [lint, build-image, e2e-docker, e2e-real-plane]
+    needs: [lint, build-image, e2e]
     if: |
       github.event_name != 'pull_request' &&
-      needs.e2e-docker.result == 'success' &&
-      needs.e2e-real-plane.result == 'success' &&
+      needs.e2e.result == 'success' &&
       needs.lint.result == 'success'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
