@@ -4,6 +4,25 @@ All notable changes to plane-forge-bridge are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-05-24
+
+### Fixed
+
+- **Plane REST `POST /issues/` response decode regression from v0.1.2.**
+  v0.1.2 modelled `WorkItem.state` / `labels` / `assignees` as object
+  refs to match the webhook wire shape (PFB-24), but Plane CE v1.3.1's
+  REST surface returns the same fields as bare UUID strings (state) and
+  arrays of bare UUID strings (labels, assignees). Every forge→plane
+  create call decoded the POST response with
+  `json: cannot unmarshal string into Go struct field WorkItem.state of
+  type plane.StateRef`, leaving the bridge with no record of the
+  just-created Plane work item and causing a duplicate Forgejo issue
+  when Plane's webhook for the new work item came back. Added custom
+  `UnmarshalJSON` on `StateRef` / `LabelRef` / `AssigneeRef` accepting
+  both the bare-UUID and object forms; webhook decode is unchanged.
+  Regression tests pin both shapes against verbatim captures from
+  plane.stern.ca so the next contract drift fails in CI. See PFB-25.
+
 ## [0.1.2] — 2026-05-24
 
 ### Fixed
@@ -59,6 +78,7 @@ Loop-break: HTML-comment marker + in-memory LRU. Single static binary,
 distroless runtime, stateless. CI matrix tests against real Forgejo 15
 and Gitea 1.22 service containers end-to-end on every PR.
 
+[0.1.3]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hstern/plane-forge-bridge/releases/tag/v0.1.0
