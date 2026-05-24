@@ -143,11 +143,17 @@ jobs:
           # on the docker network, so we open the allowlist. Not appropriate
           # for production.
           FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
+          # Don't hide user emails in API responses / webhook payloads. The
+          # v2 identity resolver matches forge sender email → plane member
+          # email; with the default ("keep private") on, webhooks ship
+          # <id>+<login>@noreply.localhost instead of the real address.
+          FORGEJO__service__DEFAULT_KEEP_EMAIL_PRIVATE: "false"
           GITEA__security__INSTALL_LOCK: "true"
           GITEA__server__ROOT_URL: "http://localhost:3000/"
           GITEA__server__HTTP_PORT: "3000"
           GITEA__server__DOMAIN: "localhost"
           GITEA__webhook__ALLOWED_HOST_LIST: "*"
+          GITEA__service__DEFAULT_KEEP_EMAIL_PRIVATE: "false"
     env:
       FORGE_URL: http://localhost:3000
       FORGE_ADMIN_USER: pfbadmin

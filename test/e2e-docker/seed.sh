@@ -84,6 +84,37 @@ if [ -z "$api_token" ] || [ "$api_token" = "null" ]; then
 fi
 log "minted token (masked in logs)"
 
+# Flip the admin user's email visibility to public. CLI-created users
+# default to keep-email-private regardless of service.DEFAULT_*, so
+# without this the webhook sender.email arrives as
+# <id>+<login>@noreply.localhost and the bridge's v2 identity resolver
+# has nothing to match against the configured plane member.
+log "setting admin user email visibility public"
+http_code=$(
+  curl -fsS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: token $api_token" \
+    -H 'Content-Type: application/json' \
+    -X PATCH \
+    -d "{\"source_id\":0,\"login_name\":\"$FORGE_ADMIN_USER\",\"email\":\"$FORGE_ADMIN_EMAIL\",\"visibility\":\"public\"}" \
+    "$FORGE_URL/api/v1/admin/users/$FORGE_ADMIN_USER" || true
+)
+if [ "$http_code" != "200" ]; then
+  log "WARN: admin user PATCH visibility=public returned $http_code (continuing)"
+fi
+# The visibility=public above governs profile visibility; the
+# user-settings call below is what actually flips email visibility.
+http_code=$(
+  curl -fsS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: token $api_token" \
+    -H 'Content-Type: application/json' \
+    -X PATCH \
+    -d '{"email":"'"$FORGE_ADMIN_EMAIL"'","hide_email":false}' \
+    "$FORGE_URL/api/v1/user/settings" || true
+)
+if [ "$http_code" != "200" ]; then
+  log "WARN: user settings PATCH hide_email=false returned $http_code (continuing)"
+fi
+
 # Org. 422 = already exists; treat as success.
 log "creating organization $FORGE_ORG"
 http_code=$(
