@@ -1,6 +1,10 @@
 package plane
 
-import "errors"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+)
 
 // EventKind is a normalized identifier for the events this package
 // understands. It is composed from the Plane "event" + "action" fields in
@@ -56,9 +60,15 @@ type Actor struct {
 }
 
 // StateRef is the nested state object Plane serializes inside a WorkItem.
-// Real Plane (verified against CE v1.3.1) sends the full state object, not
-// a bare UUID — the bridge originally modelled this as a string and 400'd
-// on every real delivery. See PFB-24.
+//
+// Plane CE v1.3.1 serializes the same WorkItem.state field in two different
+// shapes depending on the path:
+//   - webhook deliveries send the full object (id, name, color, group)
+//   - REST POST/GET/PATCH /issues/ responses send a bare UUID string
+//
+// UnmarshalJSON accepts both so a single WorkItem type can decode either
+// path. PFB-24 fixed the webhook (object) decode; PFB-25 added the REST
+// (string) decode after a regression on the create-response path.
 type StateRef struct {
 	ID    string `json:"id"`
 	Name  string `json:"name,omitempty"`
@@ -66,19 +76,64 @@ type StateRef struct {
 	Group string `json:"group,omitempty"`
 }
 
+// UnmarshalJSON accepts either a bare UUID string (REST) or the
+// {id,name,color,group} object (webhook).
+func (s *StateRef) UnmarshalJSON(data []byte) error {
+	return unmarshalRefBothShapes(data, &s.ID, (*stateRefAlias)(s))
+}
+
 // LabelRef is the nested label object Plane serializes inside a WorkItem.
-// Same shape rationale as StateRef.
+// Same two-shape rationale as StateRef — REST returns a bare UUID string,
+// webhook returns {id, name, color}. UnmarshalJSON handles both.
 type LabelRef struct {
 	ID    string `json:"id"`
 	Name  string `json:"name,omitempty"`
 	Color string `json:"color,omitempty"`
 }
 
+// UnmarshalJSON accepts either a bare UUID string (REST) or the
+// {id,name,color} object (webhook).
+func (l *LabelRef) UnmarshalJSON(data []byte) error {
+	return unmarshalRefBothShapes(data, &l.ID, (*labelRefAlias)(l))
+}
+
 // AssigneeRef is the nested member object Plane serializes inside a
-// WorkItem's assignees array. Same shape rationale as StateRef.
+// WorkItem's assignees array. Same two-shape rationale as StateRef — REST
+// returns a bare UUID string, webhook returns {id, display_name}.
+// UnmarshalJSON handles both.
 type AssigneeRef struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name,omitempty"`
+}
+
+// UnmarshalJSON accepts either a bare UUID string (REST) or the
+// {id,display_name} object (webhook).
+func (a *AssigneeRef) UnmarshalJSON(data []byte) error {
+	return unmarshalRefBothShapes(data, &a.ID, (*assigneeRefAlias)(a))
+}
+
+// Aliases break the UnmarshalJSON recursion when we want the default
+// struct decode for the object form.
+type (
+	stateRefAlias    StateRef
+	labelRefAlias    LabelRef
+	assigneeRefAlias AssigneeRef
+)
+
+// unmarshalRefBothShapes decodes a WorkItem ref field that may arrive as
+// either a bare UUID string (REST) or an object (webhook). On a string the
+// UUID is written into idOut; on an object the full struct is decoded via
+// objOut (which must be an alias pointer so the default struct decoder
+// runs, not the caller's custom UnmarshalJSON). null and empty payloads
+// leave the target untouched.
+func unmarshalRefBothShapes(data []byte, idOut *string, objOut any) error {
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '"' {
+		return json.Unmarshal(data, idOut)
+	}
+	return json.Unmarshal(data, objOut)
 }
 
 // WorkItem is the minimal subset of Plane's IssueExpandSerializer output we

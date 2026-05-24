@@ -1,6 +1,7 @@
 package plane
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -402,5 +403,88 @@ func TestParse_RealPlaneWorkItemPayload_PFB24(t *testing.T) {
 	}
 	if got := len(ev.WorkItem.Assignees); got != 0 {
 		t.Errorf("Assignees len = %d, want 0", got)
+	}
+}
+
+// TestWorkItem_UnmarshalJSON_RESTShape_PFB25 pins decoding of a real
+// Plane CE v1.3.1 REST POST /issues/ response captured against
+// plane.stern.ca. The REST surface returns state as a bare UUID
+// string and labels/assignees as arrays of bare UUID strings — the
+// opposite shape from webhooks. v0.1.2 (the PFB-24 fix) hard-coded
+// the object form on WorkItem, regressing every create call. See
+// PFB-25.
+//
+// This test fails if anyone reverts the dual-shape UnmarshalJSON.
+func TestWorkItem_UnmarshalJSON_RESTShape_PFB25(t *testing.T) {
+	t.Parallel()
+
+	// Verbatim shape Plane CE v1.3.1 returns from
+	// POST /workspaces/<slug>/projects/<pid>/issues/. Captured against
+	// plane.stern.ca on 2026-05-24 (probe in PFB-25 body).
+	const restResponse = `{
+		"id": "2d048fe5-c172-42f2-ab92-d5d26f4d7e96",
+		"name": "pfb-25 capture sample",
+		"description_html": "<p>sample</p>",
+		"priority": "none",
+		"sequence_id": 35,
+		"state": "e931d389-7080-4612-9f6a-05b535ac3afa",
+		"assignees": ["00a3fa45-f4f8-4a19-b7cf-f86a648f717d"],
+		"labels": ["0798d982-9eef-4993-9d4b-b196d0d4ba3e"],
+		"project": "ede7e196-e408-47b6-883b-d2188f101dd0",
+		"workspace": "f0ebd07e-6540-4876-8b07-cdc15659e2b1",
+		"created_by": "00a3fa45-f4f8-4a19-b7cf-f86a648f717d"
+	}`
+
+	var wi WorkItem
+	if err := json.Unmarshal([]byte(restResponse), &wi); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if wi.State.ID != "e931d389-7080-4612-9f6a-05b535ac3afa" {
+		t.Errorf("State.ID = %q, want e931d389-...", wi.State.ID)
+	}
+	if wi.State.Name != "" {
+		t.Errorf("State.Name = %q, want empty (REST omits the name)", wi.State.Name)
+	}
+	if len(wi.Labels) != 1 || wi.Labels[0].ID != "0798d982-9eef-4993-9d4b-b196d0d4ba3e" {
+		t.Errorf("Labels = %+v", wi.Labels)
+	}
+	if wi.Labels[0].Name != "" {
+		t.Errorf("Labels[0].Name = %q, want empty (REST omits the name)", wi.Labels[0].Name)
+	}
+	if len(wi.Assignees) != 1 || wi.Assignees[0].ID != "00a3fa45-f4f8-4a19-b7cf-f86a648f717d" {
+		t.Errorf("Assignees = %+v", wi.Assignees)
+	}
+	if wi.SequenceID != 35 {
+		t.Errorf("SequenceID = %d", wi.SequenceID)
+	}
+}
+
+// TestWorkItem_UnmarshalJSON_MixedShapesNullAndEmpty covers the
+// corner cases: null values, empty arrays, and unknown keys in the
+// object form. These are all observed in real Plane responses (REST
+// returns null for unset state on certain endpoints; webhooks ship
+// extra description_* fields).
+func TestWorkItem_UnmarshalJSON_MixedShapesNullAndEmpty(t *testing.T) {
+	t.Parallel()
+
+	const payload = `{
+		"id": "abc",
+		"name": "n",
+		"state": null,
+		"labels": [],
+		"assignees": null
+	}`
+	var wi WorkItem
+	if err := json.Unmarshal([]byte(payload), &wi); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if wi.State.ID != "" {
+		t.Errorf("State.ID = %q, want empty for null state", wi.State.ID)
+	}
+	if len(wi.Labels) != 0 {
+		t.Errorf("Labels = %+v, want empty", wi.Labels)
+	}
+	if len(wi.Assignees) != 0 {
+		t.Errorf("Assignees = %+v, want empty", wi.Assignees)
 	}
 }

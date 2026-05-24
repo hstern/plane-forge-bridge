@@ -133,6 +133,73 @@ func TestCreateIssue_APIError(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_RealPlaneRESTShape_PFB25 pins end-to-end decoding of
+// the verbatim REST POST response Plane CE v1.3.1 returns, including
+// the bare-UUID state / labels / assignees that PFB-25 regressed on.
+// The fixture is a real capture from plane.stern.ca (see PFB-25 body).
+func TestCreateIssue_RealPlaneRESTShape_PFB25(t *testing.T) {
+	t.Parallel()
+
+	const realRESTResponse = `{
+		"id": "2d048fe5-c172-42f2-ab92-d5d26f4d7e96",
+		"type_id": null,
+		"created_at": "2026-05-24T03:44:46.591330Z",
+		"updated_at": "2026-05-24T03:44:46.591386Z",
+		"deleted_at": null,
+		"point": null,
+		"name": "pfb-25 capture sample",
+		"description_html": "<p>sample</p>",
+		"description_binary": null,
+		"priority": "none",
+		"start_date": null,
+		"target_date": null,
+		"sequence_id": 35,
+		"sort_order": 255535,
+		"completed_at": null,
+		"archived_at": null,
+		"is_draft": false,
+		"external_source": null,
+		"external_id": null,
+		"created_by": "00a3fa45-f4f8-4a19-b7cf-f86a648f717d",
+		"updated_by": null,
+		"project": "ede7e196-e408-47b6-883b-d2188f101dd0",
+		"workspace": "f0ebd07e-6540-4876-8b07-cdc15659e2b1",
+		"parent": null,
+		"state": "e931d389-7080-4612-9f6a-05b535ac3afa",
+		"estimate_point": null,
+		"type": null,
+		"assignees": ["00a3fa45-f4f8-4a19-b7cf-f86a648f717d"],
+		"labels": ["0798d982-9eef-4993-9d4b-b196d0d4ba3e"]
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, realRESTResponse)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+	got, err := c.CreateIssue(context.Background(), "proj-1", CreateIssueRequest{
+		Name: "pfb-25 capture sample",
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if got.State.ID != "e931d389-7080-4612-9f6a-05b535ac3afa" {
+		t.Errorf("State.ID = %q", got.State.ID)
+	}
+	if len(got.Labels) != 1 || got.Labels[0].ID != "0798d982-9eef-4993-9d4b-b196d0d4ba3e" {
+		t.Errorf("Labels = %+v", got.Labels)
+	}
+	if len(got.Assignees) != 1 || got.Assignees[0].ID != "00a3fa45-f4f8-4a19-b7cf-f86a648f717d" {
+		t.Errorf("Assignees = %+v", got.Assignees)
+	}
+	if got.SequenceID != 35 {
+		t.Errorf("SequenceID = %d", got.SequenceID)
+	}
+}
+
 func TestUpdateIssue_HappyPath(t *testing.T) {
 	t.Parallel()
 
