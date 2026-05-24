@@ -175,7 +175,17 @@ func (e *Engine) handlePlaneWorkItemCreated(ctx context.Context, evt *plane.Even
 	// label IDs. Two cache hops: plane UUID → name via the plane label
 	// cache, then name → forge integer ID (with auto-create) via the
 	// forge label cache.
-	names, err := e.resolvePlaneLabelNames(ctx, link.PlaneProjectID, evt.WorkItem.Labels)
+	//
+	// As of PFB-24 the webhook payload includes the label name inline
+	// (LabelRef has Name + Color alongside ID), so the UUID→name lookup
+	// could be skipped here. We keep it for now so the resolver remains
+	// the single source of truth for label-name resolution (in case
+	// upstream ever drops .Name from a future event type).
+	labelUUIDs := make([]string, len(evt.WorkItem.Labels))
+	for i, l := range evt.WorkItem.Labels {
+		labelUUIDs[i] = l.ID
+	}
+	names, err := e.resolvePlaneLabelNames(ctx, link.PlaneProjectID, labelUUIDs)
 	if err != nil {
 		return nil, fmt.Errorf("sync: resolve plane label names: %w", err)
 	}

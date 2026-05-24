@@ -7,15 +7,20 @@
     "id": "33333333-3333-3333-3333-333333333333",
     "name": "Investigate flaky CI runner (in progress)",
     "description_html": "<p>Race detector trips intermittently. Bisecting.</p>",
-    "state": "99999999-9999-9999-9999-999999999999",
+    "state": {
+      "id": "99999999-9999-9999-9999-999999999999",
+      "name": "In Progress",
+      "color": "#0066ff",
+      "group": "started"
+    },
     "priority": "urgent",
     "assignees": [
-      "55555555-5555-5555-5555-555555555555",
-      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      { "id": "55555555-5555-5555-5555-555555555555", "display_name": "Alice" },
+      { "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "display_name": "Bob" }
     ],
     "labels": [
-      "66666666-6666-6666-6666-666666666666",
-      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      { "id": "66666666-6666-6666-6666-666666666666", "name": "bug", "color": "#ff0000" },
+      { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "name": "regression", "color": "#aa00aa" }
     ],
     "project": "77777777-7777-7777-7777-777777777777",
     "workspace": "22222222-2222-2222-2222-222222222222",

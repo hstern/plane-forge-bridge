@@ -530,7 +530,12 @@ jobs:
               "id": "33333333-3333-3333-3333-333333333333",
               "name": "e2e: hello from plane",
               "description_html": "<p>Issue created on Plane that the bridge should mirror to forge.</p>",
-              "state": "11111111-0000-0000-0000-000000000002",
+              "state": {
+                "id": "11111111-0000-0000-0000-000000000002",
+                "name": "In Progress",
+                "color": "#0066ff",
+                "group": "started"
+              },
               "project": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
               "workspace": "00000000-0000-0000-0000-000000000aaa",
               "created_by": "44444444-4444-4444-4444-444444444444",

@@ -334,3 +334,73 @@ func TestParse_RealPlaneActionVerbsAccepted(t *testing.T) {
 		})
 	}
 }
+
+// TestParse_RealPlaneWorkItemPayload_PFB24 pins decoding of a real
+// Plane CE v1.3.1 work_item.created payload captured from
+// postgres webhook_logs.request_body. It exercises the object-form
+// state/labels (PFB-24) alongside the past-tense action (PFB-22) —
+// either regressing alone produces a 400-malformed-payload response
+// in the bridge handler.
+func TestParse_RealPlaneWorkItemPayload_PFB24(t *testing.T) {
+	t.Parallel()
+
+	const realPlanePayload = `{
+		"event": "issue",
+		"action": "created",
+		"webhook_id": "3eda452e-0000-0000-0000-000000000001",
+		"workspace_id": "00000000-0000-0000-0000-000000000aaa",
+		"data": {
+			"id": "12345678-1234-1234-1234-123456789abc",
+			"name": "Real Plane payload",
+			"description_html": "<p>captured from postgres webhook_logs.request_body</p>",
+			"state": {
+				"id": "e931d389-7080-4612-9f6a-05b535ac3afa",
+				"name": "Backlog",
+				"color": "#60646C",
+				"group": "backlog"
+			},
+			"priority": "none",
+			"assignees": [],
+			"labels": [
+				{
+					"id": "abcdef00-0000-0000-0000-000000000001",
+					"name": "claude:DOCS-25",
+					"color": "#FAB287"
+				}
+			],
+			"project": "77777777-7777-7777-7777-777777777777",
+			"workspace": "00000000-0000-0000-0000-000000000aaa",
+			"created_by": "88888888-8888-8888-8888-888888888888",
+			"sequence_id": 33
+		}
+	}`
+
+	h := http.Header{}
+	h.Set(HeaderEvent, planeEventIssue)
+	h.Set(HeaderDelivery, "pfb24-regression")
+	ev, err := Parse(h, []byte(realPlanePayload))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if ev.Kind != EventWorkItemCreated {
+		t.Errorf("Kind = %q, want %q", ev.Kind, EventWorkItemCreated)
+	}
+	if ev.WorkItem == nil {
+		t.Fatal("WorkItem nil")
+	}
+	if got := ev.WorkItem.State.ID; got != "e931d389-7080-4612-9f6a-05b535ac3afa" {
+		t.Errorf("State.ID = %q", got)
+	}
+	if got := ev.WorkItem.State.Name; got != "Backlog" {
+		t.Errorf("State.Name = %q", got)
+	}
+	if got := len(ev.WorkItem.Labels); got != 1 {
+		t.Fatalf("Labels len = %d, want 1", got)
+	}
+	if got := ev.WorkItem.Labels[0].Name; got != "claude:DOCS-25" {
+		t.Errorf("Labels[0].Name = %q", got)
+	}
+	if got := len(ev.WorkItem.Assignees); got != 0 {
+		t.Errorf("Assignees len = %d, want 0", got)
+	}
+}

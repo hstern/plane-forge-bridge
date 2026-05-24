@@ -55,24 +55,54 @@ type Actor struct {
 	DisplayName string `json:"display_name"`
 }
 
+// StateRef is the nested state object Plane serializes inside a WorkItem.
+// Real Plane (verified against CE v1.3.1) sends the full state object, not
+// a bare UUID — the bridge originally modelled this as a string and 400'd
+// on every real delivery. See PFB-24.
+type StateRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+	Group string `json:"group,omitempty"`
+}
+
+// LabelRef is the nested label object Plane serializes inside a WorkItem.
+// Same shape rationale as StateRef.
+type LabelRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+}
+
+// AssigneeRef is the nested member object Plane serializes inside a
+// WorkItem's assignees array. Same shape rationale as StateRef.
+type AssigneeRef struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
 // WorkItem is the minimal subset of Plane's IssueExpandSerializer output we
 // need to translate to a forge issue. Plane calls these "work items" in its
 // UI and "issues" in its database / API; we use the UI name in our public
 // surface.
+//
+// State, Labels, and Assignees are serialized as nested objects by real
+// Plane (not as the bare UUIDs the original modelling assumed). Callers
+// that want just the UUID read .State.ID, iterate .Labels[i].ID, etc.
 type WorkItem struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Description    string   `json:"description_html"`
-	State          string   `json:"state"`
-	Priority       string   `json:"priority"`
-	Assignees      []string `json:"assignees"`
-	Labels         []string `json:"labels"`
-	Project        string   `json:"project"`
-	Workspace      string   `json:"workspace"`
-	CreatedBy      string   `json:"created_by"`
-	SequenceID     int      `json:"sequence_id"`
-	ExternalSource string   `json:"external_source,omitempty"`
-	ExternalID     string   `json:"external_id,omitempty"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	Description    string        `json:"description_html"`
+	State          StateRef      `json:"state"`
+	Priority       string        `json:"priority"`
+	Assignees      []AssigneeRef `json:"assignees"`
+	Labels         []LabelRef    `json:"labels"`
+	Project        string        `json:"project"`
+	Workspace      string        `json:"workspace"`
+	CreatedBy      string        `json:"created_by"`
+	SequenceID     int           `json:"sequence_id"`
+	ExternalSource string        `json:"external_source,omitempty"`
+	ExternalID     string        `json:"external_id,omitempty"`
 }
 
 // Comment is the minimal subset of Plane's IssueCommentSerializer output
