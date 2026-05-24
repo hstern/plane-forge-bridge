@@ -68,6 +68,19 @@ func (e *Engine) resolvePlaneMember(ctx context.Context, forgeUsername, forgeEma
 			"forge_username", forgeUsername, "plane_member_id", id)
 		return id, nil
 	}
+	// Forge webhooks substitute a `<login>@noreply.<domain>` placeholder
+	// for the sender's email regardless of the visibility configuration
+	// at the service or user level. The forge API itself exposes the
+	// real email on /users/{login}, so when we see the noreply form we
+	// look up the real address via SearchUsers(login) before attempting
+	// the plane-member match.
+	if forgeUsername != "" && (forgeEmail == "" || isNoreplyEmail(forgeEmail)) {
+		if realEmail, ok := e.lookupRealForgeEmail(ctx, forgeUsername); ok {
+			e.Log.Debug("identity: resolved real forge email via SearchUsers",
+				"forge_username", forgeUsername, "webhook_email", forgeEmail, "real_email", realEmail)
+			forgeEmail = realEmail
+		}
+	}
 	if forgeEmail == "" {
 		e.Log.Debug("identity: forge sender has no email; skipping email match",
 			"forge_username", forgeUsername)
@@ -212,4 +225,39 @@ func (e *Engine) lookupForgeByEmail(ctx context.Context, email string) (string, 
 		Expiry: time.Now().Add(identityCacheTTL),
 	}
 	return login, nil
+}
+
+// isNoreplyEmail reports whether email looks like a forge-side noreply
+// placeholder (e.g. "alice@noreply.example.com"). Gitea/Forgejo
+// substitute these into webhook payloads regardless of the visibility
+// configuration on the user or service; the bridge has to look up the
+// real address via the forge API to do email-based identity matching.
+func isNoreplyEmail(email string) bool {
+	at := strings.IndexByte(email, '@')
+	if at < 0 {
+		return false
+	}
+	return strings.HasPrefix(email[at+1:], "noreply.")
+}
+
+// lookupRealForgeEmail asks the forge for the user's real email via
+// SearchUsers(login) and picks the exact-login match. Returns the real
+// email + true on hit; "" + false on miss, error, or no exact match.
+// Errors never fail the calling resolver — identity is best-effort.
+func (e *Engine) lookupRealForgeEmail(ctx context.Context, login string) (string, bool) {
+	if e.ForgeClient == nil || login == "" {
+		return "", false
+	}
+	users, err := e.ForgeClient.SearchUsers(ctx, login)
+	if err != nil {
+		e.Log.Warn("identity: forge SearchUsers failed during real-email lookup",
+			"login", login, "err", err)
+		return "", false
+	}
+	for _, u := range users {
+		if u.Login == login && u.Email != "" && !isNoreplyEmail(u.Email) {
+			return u.Email, true
+		}
+	}
+	return "", false
 }
