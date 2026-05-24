@@ -64,9 +64,13 @@ type forgeCacheEntry struct {
 func (e *Engine) resolvePlaneMember(ctx context.Context, forgeUsername, forgeEmail string) (string, error) {
 	// 1. Static config wins.
 	if id, ok := e.Users[forgeUsername]; ok && id != "" {
+		e.Log.Debug("identity: plane resolved via static config",
+			"forge_username", forgeUsername, "plane_member_id", id)
 		return id, nil
 	}
 	if forgeEmail == "" {
+		e.Log.Debug("identity: forge sender has no email; skipping email match",
+			"forge_username", forgeUsername)
 		return "", nil
 	}
 	// 2. Email match against the cached workspace member list.
@@ -82,10 +86,14 @@ func (e *Engine) resolvePlaneMember(ctx context.Context, forgeUsername, forgeEma
 			continue
 		}
 		if strings.ToLower(m.Email) == want {
+			e.Log.Debug("identity: plane resolved via email match",
+				"forge_username", forgeUsername, "forge_email", forgeEmail, "plane_member_id", m.ID)
 			return m.ID, nil
 		}
 	}
 	// 3. No match.
+	e.Log.Debug("identity: no plane member match",
+		"forge_username", forgeUsername, "forge_email", forgeEmail, "candidates", len(members))
 	return "", nil
 }
 
