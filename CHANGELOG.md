@@ -4,6 +4,28 @@ All notable changes to plane-forge-bridge are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-05-24
+
+### Fixed
+
+- **Plane → forge: drop work_item.created echoes via external_source
+  (PFB-27).** The bridge stamps `external_source="forge:owner/repo"`
+  on every forge→plane create; Plane echoes that back on its own
+  `work_item.created` webhook. The HTML-comment loop-break marker is
+  supposed to catch the echo, but Plane CE v1.3.1 strips HTML comments
+  out of `description_html` during ProseMirror sanitization (verified
+  against plane.stern.ca — `<p>x</p>\n\n<!-- ... -->` round-trips as
+  `<div><p>x</p>\n\n</div>`; comment bodies preserve the marker). With
+  no marker on the echo, `handlePlaneWorkItemCreated` would create a
+  duplicate forge issue — the failure mode PFB-25 exposed in
+  production. The handler now gates on `WorkItem.ExternalSource`
+  starting with the bridge's `"forge:"` prefix and skips with
+  `reasonPlaneCreatedEchoExternalSource`. Non-bridge external sources
+  (e.g. an operator importing from GitHub) are unaffected. AGENTS.md
+  updated to document the ProseMirror sanitization finding so the next
+  feature work doesn't reach for the marker as the durable
+  description-side defence.
+
 ## [0.1.3] — 2026-05-24
 
 ### Fixed
@@ -78,6 +100,7 @@ Loop-break: HTML-comment marker + in-memory LRU. Single static binary,
 distroless runtime, stateless. CI matrix tests against real Forgejo 15
 and Gitea 1.22 service containers end-to-end on every PR.
 
+[0.1.4]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hstern/plane-forge-bridge/compare/v0.1.0...v0.1.1

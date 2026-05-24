@@ -170,6 +170,82 @@ func TestHandlePlaneWorkItem_AssigneeResolvedFromForgeEmail(t *testing.T) {
 	}
 }
 
+// TestHandlePlaneWorkItem_CreatedEchoSkipsByExternalSource is the
+// regression test for PFB-27. The bridge stamps external_source on
+// every forge → plane create; Plane echoes that back on its own
+// work_item.created webhook. The HTML-comment marker the bridge also
+// stamps would normally catch this, but Plane CE v1.3.1 strips HTML
+// comments out of description_html during sanitization (preserves
+// them in comment_html — verified against plane.stern.ca). The
+// external_source check is the durable defence.
+//
+// This test fails if anyone removes the external_source gate.
+func TestHandlePlaneWorkItem_CreatedEchoSkipsByExternalSource(t *testing.T) {
+	t.Parallel()
+	e, _, fc := newPlaneWorkItemTestEngine(t)
+
+	evt := mkPlaneWorkItemEvent(plane.EventWorkItemCreated)
+	// The work item carries the bridge's external_source — this is our own
+	// echo. The marker on the description is gone (Plane stripped it during
+	// sanitization), so the external_source check is what saves us.
+	evt.WorkItem.ExternalSource = "forge:acme/widgets"
+	evt.WorkItem.ExternalID = "42"
+
+	out, err := e.HandlePlaneWorkItem(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionSkipped {
+		t.Fatalf("Action=%v reason=%q, want ActionSkipped", out.Action, out.Reason)
+	}
+	if out.Reason != reasonPlaneCreatedEchoExternalSource {
+		t.Errorf("Reason=%q, want %q", out.Reason, reasonPlaneCreatedEchoExternalSource)
+	}
+	if out.Link == nil {
+		t.Errorf("Link should be set on the echo skip — the project link was matched")
+	}
+	if len(fc.IssueCreates) != 0 {
+		t.Errorf("IssueCreates=%d on echo path — must be 0 (duplicate avoidance)",
+			len(fc.IssueCreates))
+	}
+}
+
+// TestHandlePlaneWorkItem_CreatedNonBridgeExternalSourceProceeds
+// pins that external_source pointing at a non-bridge system (e.g.
+// "github:foo/bar" if an operator imports issues from GitHub) does
+// NOT trigger the echo skip — only the "forge:" prefix is the bridge
+// signal. Without this guard the bridge would silently drop legitimate
+// non-bridge work items.
+func TestHandlePlaneWorkItem_CreatedNonBridgeExternalSourceProceeds(t *testing.T) {
+	t.Parallel()
+	e, pc, fc := newPlaneWorkItemTestEngine(t)
+	pc.ListProjectLabelsFunc = func(_ context.Context, _ string) ([]plane.Label, error) {
+		return []plane.Label{
+			{ID: "label-uuid-bug", Name: "bug"},
+			{ID: "label-uuid-help", Name: "help wanted"},
+		}, nil
+	}
+	fc.ListRepoLabelsFunc = func(_ context.Context, _, _ string) ([]forge.Label, error) {
+		return []forge.Label{{ID: 11, Name: "bug"}, {ID: 22, Name: "help wanted"}}, nil
+	}
+
+	evt := mkPlaneWorkItemEvent(plane.EventWorkItemCreated)
+	evt.WorkItem.ExternalSource = "github:acme/widgets"
+	evt.WorkItem.ExternalID = "99"
+
+	out, err := e.HandlePlaneWorkItem(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Action != ActionCreated {
+		t.Fatalf("Action=%v reason=%q, want ActionCreated (non-bridge source should mirror)",
+			out.Action, out.Reason)
+	}
+	if len(fc.IssueCreates) != 1 {
+		t.Errorf("IssueCreates=%d, want 1", len(fc.IssueCreates))
+	}
+}
+
 func TestHandlePlaneWorkItem_NoLinkSkips(t *testing.T) {
 	t.Parallel()
 	e, _, fc := newPlaneWorkItemTestEngine(t)

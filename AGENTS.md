@@ -54,6 +54,16 @@ any self-hosted Forgejo Actions runner because `runs-on` is parameterized via
   short LRU of `(source_event_id, target_object_id)` pairs catches the case
   where the marker was stripped. Both layers must stay — they cover different
   failure modes.
+  - **Plane CE v1.3.1 strips HTML comments from `description_html`** during
+    ProseMirror sanitization (verified against plane.stern.ca — POST body
+    `<p>x</p>\n\n<!-- ... -->` round-trips as `<div><p>x</p>\n\n</div>`).
+    Comment bodies (`comment_html`) preserve the marker; work item
+    descriptions do not. The marker check is therefore non-functional on
+    inbound `work_item.*` echoes. The durable defence is the
+    `external_source` round-trip: the bridge stamps
+    `external_source="forge:owner/repo"` on every forge→plane create, and
+    `handlePlaneWorkItemCreated` skips any inbound `work_item.created`
+    whose `WorkItem.ExternalSource` starts with `"forge:"`. See PFB-27.
 - **HMAC verification happens at the HTTP handler boundary**, before the body
   is parsed. Constant-time compare. Reject on missing header.
 - **Stateless process.** No on-disk state, no DB. Config + env vars in, HTTP

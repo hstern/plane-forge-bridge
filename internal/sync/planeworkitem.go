@@ -37,7 +37,31 @@ const (
 	// loud so operators can correlate the deferral with the rollout
 	// state.
 	reasonPlaneIssueWriterMissing = "plane → forge issue writes deferred — forge client build does not implement ForgeIssueWriter"
+
+	// reasonPlaneCreatedEchoExternalSource is returned when a plane
+	// work_item.created webhook arrives for a work item that already
+	// carries a bridge-stamped external_source ("forge:owner/repo"). The
+	// bridge sets external_source / external_id on every forge → plane
+	// create, so a created webhook with that pair set is necessarily the
+	// echo of our own write — mirroring it back to forge would duplicate
+	// the original forge issue.
+	//
+	// This is the durable backstop from PFB-27. The HTML-comment marker
+	// is the bridge's primary loop-break defence, but Plane CE v1.3.1
+	// strips HTML comments from description_html during ProseMirror
+	// sanitization (verified against plane.stern.ca), so the marker
+	// never reaches the webhook payload for work item descriptions.
+	// Plane preserves the marker in comment_html, so comment echoes
+	// still rely on the marker.
+	reasonPlaneCreatedEchoExternalSource = "plane work_item.created echoes a bridge-originated work item (external_source matches forge: prefix)"
 )
+
+// externalSourceForgePrefix is the prefix the bridge stamps on every
+// forge → plane create. Matching it on an inbound work_item.created
+// webhook is the durable signal that the work item is our own echo —
+// the marker check can't see it (Plane sanitizes HTML comments out of
+// description_html). See PFB-27.
+const externalSourceForgePrefix = "forge:"
 
 // HandlePlaneWorkItem translates a plane work_item.* event into a forge
 // issue create or update. This is the inverse of HandleForgeIssue and
@@ -138,11 +162,34 @@ func (e *Engine) HandlePlaneWorkItem(ctx context.Context, evt *plane.Event) (*Ou
 }
 
 // handlePlaneWorkItemCreated implements the EventWorkItemCreated branch.
-// CreateIssue is unconditional in v1 (no reverse lookup); the caller's
-// loop-break LRU is the only defence against a re-delivered create
-// producing a duplicate forge issue. The LRU is the server's job and
-// fires before we get here, so v1 ships without the redundant lookup.
+//
+// First gate: external_source check. The bridge stamps
+// external_source="forge:owner/repo" on every forge → plane create
+// (see externalRef). A plane work_item.created event whose WorkItem
+// carries that prefix is necessarily our own echo — mirroring it back
+// would duplicate the original forge issue. The check is the durable
+// backstop from PFB-27 (the marker-stripping window the inbound
+// HTML-comment marker can't cover).
+//
+// Second gate (unchanged): forge writer capability check.
+//
+// CreateIssue is otherwise unconditional in v1 — no reverse lookup,
+// no LRU consultation here.
 func (e *Engine) handlePlaneWorkItemCreated(ctx context.Context, evt *plane.Event, link *mapping.Link) (*Outcome, error) {
+	if strings.HasPrefix(evt.WorkItem.ExternalSource, externalSourceForgePrefix) {
+		e.Log.Info("dropping plane work_item.created echo (external_source matches bridge prefix)",
+			"plane_project", evt.WorkItem.Project,
+			"work_item", evt.WorkItem.ID,
+			"external_source", evt.WorkItem.ExternalSource,
+			"external_id", evt.WorkItem.ExternalID,
+			"delivery", evt.DeliveryID)
+		return &Outcome{
+			Action: ActionSkipped,
+			Reason: reasonPlaneCreatedEchoExternalSource,
+			Link:   link,
+		}, nil
+	}
+
 	writer, ok := e.ForgeClient.(ForgeIssueWriter)
 	if !ok {
 		e.Log.Warn("plane work_item.created received but ForgeClient cannot write issues",
