@@ -41,6 +41,12 @@ func TestParse_Fixtures(t *testing.T) {
 		check       func(t *testing.T, ev *Event)
 	}{
 		{
+			// Verbatim capture from Plane CE v1.3.1 (plane.stern.ca,
+			// 2026-05-24). The fixture exercises: object-form state
+			// (PFB-24), past-tense action verb (PFB-22), extra
+			// description_*/description_json fields the bridge ignores,
+			// and the full activity.actor object Plane ships (the bridge
+			// only reads .id + .display_name today).
 			name:        "work item created",
 			fixture:     "work_item_created.json",
 			eventHeader: planeEventIssue,
@@ -49,23 +55,26 @@ func TestParse_Fixtures(t *testing.T) {
 				if ev.WorkItem == nil {
 					t.Fatal("WorkItem nil")
 				}
-				if got := ev.WorkItem.Name; got != "Investigate flaky CI runner" {
+				if got := ev.WorkItem.Name; got != "pfb-25 capture sample" {
 					t.Errorf("Name = %q", got)
 				}
-				if got := ev.WorkItem.SequenceID; got != 42 {
+				if got := ev.WorkItem.SequenceID; got != 35 {
 					t.Errorf("SequenceID = %d", got)
 				}
-				if got := len(ev.WorkItem.Assignees); got != 1 {
-					t.Errorf("Assignees len = %d", got)
+				if got := ev.WorkItem.State.ID; got != "e931d389-7080-4612-9f6a-05b535ac3afa" {
+					t.Errorf("State.ID = %q", got)
 				}
-				if ev.WorkItem.Priority != "high" {
-					t.Errorf("Priority = %q", ev.WorkItem.Priority)
+				if got := ev.WorkItem.State.Name; got != "Backlog" {
+					t.Errorf("State.Name = %q", got)
+				}
+				if got := ev.WorkItem.Priority; got != "none" {
+					t.Errorf("Priority = %q", got)
 				}
 				if ev.Comment != nil {
 					t.Errorf("Comment should be nil")
 				}
-				if ev.Actor.DisplayName != "Henry" {
-					t.Errorf("Actor.DisplayName = %q", ev.Actor.DisplayName)
+				if got := ev.Actor.DisplayName; got != "henry" {
+					t.Errorf("Actor.DisplayName = %q", got)
 				}
 			},
 		},
