@@ -1,7 +1,9 @@
 # plane-forge-bridge
 
-**Status: v0.1.0** — first release published. Multi-arch image (linux/amd64 + linux/arm64) at
-`ghcr.io/hstern/plane-forge-bridge:0.1.0` (also `:0.1`, `:0`, `:latest`).
+**Status: v0.1.2** — multi-arch image (linux/amd64 + linux/arm64) at
+`ghcr.io/hstern/plane-forge-bridge:0.1.2` (also `:0.1`, `:0`, `:latest`).
+Patch release fixing two real-deployment bugs in the plane → forge path
+that v0.1.0 shipped silently broken — see CHANGELOG.
 
 Bidirectional webhook bridge between [Plane](https://plane.so) and any
 Gitea-API-compatible git forge ([Forgejo](https://forgejo.org/),
@@ -46,7 +48,7 @@ See [docs/design.md](docs/design.md) for the full design + open questions.
 1. **Pull the image**
 
    ```sh
-   docker pull ghcr.io/hstern/plane-forge-bridge:0.1.0
+   docker pull ghcr.io/hstern/plane-forge-bridge:0.1.2
    ```
 
 2. **Write a `config.yaml`** — copy [`config.example.yaml`](config.example.yaml)
@@ -64,7 +66,7 @@ See [docs/design.md](docs/design.md) for the full design + open questions.
      -e PFB_FORGE_WEBHOOK_SECRET=... \
      -e PFB_PLANE_API_KEY=...      \
      -e PFB_PLANE_WEBHOOK_SECRET=... \
-     ghcr.io/hstern/plane-forge-bridge:0.1.0 \
+     ghcr.io/hstern/plane-forge-bridge:0.1.2 \
      --config /etc/pfb/config.yaml
    ```
 
@@ -82,12 +84,12 @@ See [docs/design.md](docs/design.md) for the full design + open questions.
    each accepted webhook is one info-level line with `kind`, `delivery_id`,
    and the resulting outbound action.
 
-## What ships in v0.1.0
+## What ships in v0.1
 
 **Bidirectional**
 
 - Issues create/update/close/reopen ↔ work items (title, description, state, assignee, labels)
-- Comments create both ways (edit/delete deferred — see [PFB-12](https://github.com/hstern/plane-forge-bridge/issues))
+- Comments create both ways (edit/delete deferred)
 - Labels both ways with auto-create on either side
 - State mapping per-link (forge `open`/`closed` ↔ configurable plane states)
 
@@ -95,10 +97,10 @@ See [docs/design.md](docs/design.md) for the full design + open questions.
 
 - PR open/reopen/close/merge → state automation on the linked work item via
   `[PROJ-123]` bracket refs in title/body or `proj-123-foo` head-branch
-  names (review-state semantics deferred — see PFB-14)
+  names (review-state semantics deferred)
 - Plane → forge issue creation closes the loop (work_item.created → forge
   issue created with both loop-break and plane-ref markers; plane updates +
-  deletes deferred — see PFB-13)
+  deletes deferred)
 
 **Identity**
 
@@ -107,13 +109,11 @@ See [docs/design.md](docs/design.md) for the full design + open questions.
   placeholder by re-resolving through the user-search API
 - Configurable bridge bot as the final fallback
 
-**Out of v0.1.0** (tracked as PFB-12 through PFB-19): comment edit/delete
-identity persistence, plane work_item update/delete reverse lookup,
-PR-review-state automation, plane→forge label sync wire-up, custom OAuth
-flow (only needed for multi-tenant heterogeneous-email deployments), label
-cache invalidation on rename, PR state no-op suppression, plane→forge body
-author preface. Each issue has a "Make:" section pointing at the exact
-files and methods to touch.
+**Out of v0.1**: comment edit/delete identity persistence, plane
+work_item update/delete reverse lookup, PR-review-state automation,
+plane→forge label sync wire-up, custom OAuth flow (only needed for
+multi-tenant heterogeneous-email deployments), label cache invalidation
+on rename, PR state no-op suppression, plane→forge body author preface.
 
 ## Build / test
 

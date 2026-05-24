@@ -187,6 +187,17 @@ These are the contract details we relied on; they came from reading the
 upstream source at `makeplane/plane` rather than the docs site, which
 under-specifies the list endpoint:
 
+0. **`WorkItem.state`, `labels`, and `assignees` are nested objects on
+   the wire, NOT bare UUIDs.** Real Plane CE v1.3.1 serializes them as
+   `{id, name, color, group}` (state) / `{id, name, color}` (label) /
+   `{id, display_name}` (assignee). The bridge models them with the
+   `StateRef` / `LabelRef` / `AssigneeRef` types in `types.go`. Bridge
+   code that wants just the UUID reads `.State.ID` or iterates
+   `.Labels[i].ID`. The v0.1.0 release shipped these as `string` /
+   `[]string`, which made every real Plane webhook 400 on payload
+   decode — fixed in v0.1.2 with regression test
+   `TestParse_RealPlaneWorkItemPayload_PFB24`.
+
 1. **Filter parameter names.** Plane's work-item list endpoint accepts
    `external_id` and `external_source` as query parameters. When both
    are present the view short-circuits to `Issue.objects.get(...)` and

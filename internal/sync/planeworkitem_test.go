@@ -56,7 +56,10 @@ func mkPlaneWorkItemEvent(kind plane.EventKind) *plane.Event {
 			Description: "When the clock strikes 13:37, files vanish.",
 			Project:     testProjectID,
 			Workspace:   "ws-001",
-			Labels:      []string{"label-uuid-bug", "label-uuid-help"},
+			Labels: []plane.LabelRef{
+				{ID: "label-uuid-bug", Name: "bug"},
+				{ID: "label-uuid-help", Name: "help wanted"},
+			},
 		},
 	}
 }

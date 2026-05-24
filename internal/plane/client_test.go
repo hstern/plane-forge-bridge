@@ -66,7 +66,7 @@ func TestCreateIssue_HappyPath(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(WorkItem{
 			ID:       "issue-uuid",
 			Name:     gotBody.Name,
-			State:    gotBody.StateID,
+			State:    StateRef{ID: gotBody.StateID},
 			Priority: gotBody.Priority,
 		})
 	}))
