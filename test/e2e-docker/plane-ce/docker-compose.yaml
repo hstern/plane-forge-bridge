@@ -148,10 +148,21 @@ services:
       # override via `services.plane-api.ports`.
       - "8765:8000"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/instances/"]
+      # plane-backend image has wget but no curl. /api/instances/ returns
+      # 200 even before register_instance — Plane always renders the
+      # Instance row (or its absence) as JSON.
+      #
+      # Use 127.0.0.1, not localhost: gunicorn binds 0.0.0.0:8000 (IPv4
+      # only) and on some rootless podman setups `localhost` inside the
+      # container resolves to ::1, which fails ECONNREFUSED. 127.0.0.1
+      # is unambiguous across docker/podman/CI.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/api/instances/"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 30
+      # Cold-cache gunicorn boot is ~30s; static collectstatic +
+      # bucket creation adds more. Don't fail-healthy before ~60s.
+      start_period: 60s
 
   plane-worker:
     image: makeplane/plane-backend:v1.3.1

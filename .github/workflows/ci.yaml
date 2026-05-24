@@ -626,60 +626,194 @@ jobs:
   # Real-Plane round-trip. Brings up a minimum Plane CE v1.3.1 stack
   # (api+worker+deps, no frontends), seeds an admin user + workspace +
   # project + API token via direct Django ORM (Plane CE has no headless
-  # signup flow), and runs the bridge's `plane` package integration
-  # tests against real Plane over the REST API. Catches the wire-shape
-  # drift class of bug that produced PFB-22, PFB-24, and PFB-25 —
-  # those all passed CI because the e2e-docker `plane-stub` happily
-  # agreed with the bridge's synthetic testdata.
+  # signup flow), then runs the **bridge image built by build-image**
+  # against that real Plane and POSTs a synthetic forge issue webhook
+  # at it. Asserts the bridge translated the webhook into a real work
+  # item in real Plane (looked up via external_source/_id, the same
+  # round-trip the production deploy relies on).
+  #
+  # Catches the wire-shape drift class of bug that produced PFB-22,
+  # PFB-24, and PFB-25 — those all passed CI because the e2e-docker
+  # plane-stub happily agreed with the bridge's synthetic testdata.
   #
   # Separate from the e2e-docker matrix: Plane CE boot is ~90s on a
   # cold cache, and the wire shape doesn't vary by forge flavor, so
   # running once is enough.
   e2e-real-plane:
     name: e2e-real-plane
+    needs: build-image
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 20
+    env:
+      PFB_FORGE_WEBHOOK_SECRET: ci-forge-secret-${{ github.run_id }}
+      PFB_PLANE_API_KEY: ci-plane-token-${{ github.run_id }}
+      PFB_PLANE_WEBHOOK_SECRET: ci-plane-secret-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
         with:
-          go-version: '1.26'
-          cache: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bring up Plane CE v1.3.1 + seed
         id: seed
-        env:
-          # Lock the API token to a known value for grep-ability in
-          # bridge logs; otherwise seed.py emits a random UUID hex.
-          PFB_PLANE_API_KEY: ci-plane-token-${{ github.run_id }}
         run: |
           set -euo pipefail
           seed_json=$(bash test/e2e-docker/plane-ce/run.sh up | tail -n1)
           echo "seed_json=$seed_json"
-          # Mask the token in any subsequent logs.
           token=$(echo "$seed_json" | jq -r '.api_token')
+          project_id=$(echo "$seed_json" | jq -r '.project_id')
+          workspace_slug=$(echo "$seed_json" | jq -r '.workspace_slug')
           echo "::add-mask::$token"
-          # Expose every field as PFB_PLANE_TEST_<UPPER> for the test.
-          echo "$seed_json" | jq -r 'to_entries[] | "PFB_PLANE_TEST_\(.key|ascii_upcase)=\(.value)"' \
-            >> "$GITHUB_ENV"
+          # Override the run-id-derived API key with the actual seeded token
+          # (the seed honours the env hint but we re-export to be sure).
+          echo "PFB_PLANE_API_KEY=$token" >> "$GITHUB_ENV"
+          echo "PFB_PLANE_WORKSPACE_SLUG=$workspace_slug" >> "$GITHUB_ENV"
+          echo "PFB_PLANE_PROJECT_ID=$project_id" >> "$GITHUB_ENV"
 
-      - name: Run integration test against real Plane
+      - name: Pull bridge image (with retry against ghcr transient denies)
         env:
-          PFB_PLANE_TEST_BASE_URL: http://localhost:8765/api/v1
+          IMAGE: ${{ needs.build-image.outputs.image }}
         run: |
           set -euo pipefail
-          go test -tags=integration ./internal/plane -run TestIntegration -v -count=1
+          # ghcr.io intermittently returns "denied: denied" on freshly-pushed
+          # multi-arch manifests for a few seconds after the push. Re-login
+          # and retry up to 6 times with backoff before giving up.
+          for i in 1 2 3 4 5 6; do
+            if docker pull "$IMAGE"; then
+              echo "pulled after $i attempt(s)"; exit 0
+            fi
+            echo "pull failed; re-authenticating and retrying in $((i*5))s"
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io \
+              -u '${{ github.actor }}' --password-stdin
+            sleep $((i*5))
+          done
+          echo "ERROR: docker pull never succeeded"; exit 1
+
+      - name: Write bridge config pointing at real Plane
+        run: |
+          set -euo pipefail
+          # The bridge joins the pfb-e2e-plane-ce network (the one the
+          # compose creates) so it can address plane-api by service name.
+          # /api/v1 prefix is part of base_url (matches config.example.yaml).
+          cat > /tmp/pfb-config.yaml <<YAML
+          listen: "0.0.0.0:8080"
+          log_level: debug
+          forge:
+            # Forge isn't used on the forge -> plane direction the test
+            # exercises (the bridge only writes to plane). Point at a stub
+            # URL so config validation passes.
+            base_url: http://forge.invalid
+            token_env: PFB_FORGE_TOKEN
+            webhook_secret_env: PFB_FORGE_WEBHOOK_SECRET
+          plane:
+            base_url: http://plane-api:8000/api/v1
+            workspace_slug: ${PFB_PLANE_WORKSPACE_SLUG}
+            api_key_env: PFB_PLANE_API_KEY
+            webhook_secret_env: PFB_PLANE_WEBHOOK_SECRET
+          bridge_bot:
+            forge_username: pfb-bot
+            plane_member_id: 00000000-0000-0000-0000-000000000000
+          links:
+            - forge_repo: acme/widget
+              plane_project_id: ${PFB_PLANE_PROJECT_ID}
+              project_identifier: PFB
+              state_map:
+                open: Backlog
+                closed: Done
+              pr_state_map:
+                opened: "In Progress"
+                merged: "Done"
+                closed: "Cancelled"
+          users: {}
+          YAML
+
+      - name: Launch bridge on the plane-ce network
+        env:
+          IMAGE: ${{ needs.build-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run -d --name pfb-bridge \
+            --network pfb-e2e-plane-ce \
+            -p 8080:8080 \
+            -v /tmp/pfb-config.yaml:/etc/pfb/config.yaml:ro \
+            -e PFB_FORGE_TOKEN=placeholder \
+            -e PFB_FORGE_WEBHOOK_SECRET="$PFB_FORGE_WEBHOOK_SECRET" \
+            -e PFB_PLANE_API_KEY="$PFB_PLANE_API_KEY" \
+            -e PFB_PLANE_WEBHOOK_SECRET="$PFB_PLANE_WEBHOOK_SECRET" \
+            "$IMAGE" \
+            --config /etc/pfb/config.yaml
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "bridge healthy after ${i}s"; break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/healthz
+
+      - name: POST synthetic forge issue webhook
+        run: |
+          set -euo pipefail
+          body=$(cat internal/forge/testdata/issues_opened.json)
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 \
+            -hmac "$PFB_FORGE_WEBHOOK_SECRET" -hex | awk '{print $NF}')
+          status=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X POST http://127.0.0.1:8080/forge/webhook \
+            -H "X-Gitea-Signature: $sig" \
+            -H "X-Gitea-Event: issues" \
+            -H "X-Gitea-Delivery: e2e-real-plane-${{ github.run_id }}" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$body")
+          echo "status=$status body=$(cat /tmp/resp)"
+          [ "$status" = "202" ] || { echo "ERROR: bridge returned $status"; exit 1; }
+
+      - name: Assert real Plane has the mirrored work item
+        run: |
+          set -euo pipefail
+          # The bridge stamps external_source="forge:acme/widget" and
+          # external_id="42" on the create. Plane's per-project issues
+          # endpoint short-circuits to a single get when both are set,
+          # returning 200 with the bare WorkItem on a hit or 404 on a
+          # miss. Translator + decode + POST happens asynchronously
+          # relative to the 202 ack, so poll briefly.
+          for i in $(seq 1 30); do
+            http=$(curl -sS -o /tmp/wi.json -w '%{http_code}' \
+              -H "X-API-Key: $PFB_PLANE_API_KEY" \
+              "http://localhost:8765/api/v1/workspaces/$PFB_PLANE_WORKSPACE_SLUG/projects/$PFB_PLANE_PROJECT_ID/issues/?external_source=forge:acme/widget&external_id=42")
+            if [ "$http" = "200" ]; then
+              echo "work item found after ${i}s"
+              jq '{id, name, sequence_id, external_source, external_id, state}' /tmp/wi.json
+              # PFB-25 regression check: state must decode, not break the
+              # bridge. If decode broke, the bridge's POST log would show
+              # the unmarshal error and no work item would land.
+              state_id=$(jq -r '.state // empty' /tmp/wi.json)
+              [ -n "$state_id" ] || { echo "ERROR: state empty in response"; exit 1; }
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: work item never appeared in real Plane"
+          docker logs pfb-bridge --tail=80 || true
+          exit 1
+
+      - name: Bridge logs (always)
+        if: always()
+        run: docker logs pfb-bridge --tail=120 || true
 
       - name: Plane logs (always)
         if: always()
         run: |
           docker compose -f test/e2e-docker/plane-ce/docker-compose.yaml \
-            logs --tail=80 plane-api plane-worker plane-beat-worker || true
+            logs --tail=80 plane-api plane-worker || true
 
       - name: Tear down
         if: always()
-        run: bash test/e2e-docker/plane-ce/run.sh down
+        run: |
+          docker rm -f pfb-bridge 2>/dev/null || true
+          bash test/e2e-docker/plane-ce/run.sh down
 
   # Publish on push to main (rolling `:latest`) and on v* tag pushes (semver
   # tags). Never on PRs. Retag the build-image artifact rather than rebuild —

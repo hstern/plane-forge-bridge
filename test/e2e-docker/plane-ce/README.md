@@ -1,11 +1,11 @@
 # test/e2e-docker/plane-ce — real Plane CE in CI
 
 A minimal Plane CE v1.3.1 stack the bridge spins up to round-trip a
-real REST + webhook exchange against the actual Plane backend (not the
-recording stub). This is the structural fix from PFB-28 for the class
-of bug that produced PFB-22, PFB-24, and PFB-25 — testdata that
-diverged from real Plane wire shape, with the existing e2e stub happy
-to agree with synthetic data.
+real forge webhook → translator → POST `/issues/` → assertion exchange
+against the actual Plane backend (not the recording stub). This is the
+structural fix from PFB-28 for the class of bug that produced PFB-22,
+PFB-24, and PFB-25 — testdata that diverged from real Plane wire
+shape, with the existing e2e stub happy to agree with synthetic data.
 
 ## What runs
 
@@ -25,6 +25,30 @@ for the REST API + webhook delivery worker:
 Trimmed from the upstream `makeplane/plane` compose by dropping the
 frontends (web, space, admin, live), the proxy, and all persistent
 volumes — none are needed for headless REST + webhook coverage.
+
+## What CI does
+
+The `e2e-real-plane` job in `.github/workflows/ci.yaml`:
+
+1. Brings up this stack via `run.sh up` (~90s on a cold cache)
+2. Seeds an admin user + workspace + project + API token via direct
+   Django ORM (see `seed.py`)
+3. Pulls **the bridge image built by `build-image`** (not the source —
+   this is the artifact that's about to be published)
+4. Runs that image as a sibling container on the `pfb-e2e-plane-ce`
+   network, configured to talk to `plane-api:8000/api/v1`
+5. POSTs a synthetic Forgejo `issues.opened` webhook
+   (`internal/forge/testdata/issues_opened.json`) at the bridge
+6. Polls real Plane via REST for the work item the bridge should
+   have created, looking it up by `external_source=forge:acme/widget`
+   + `external_id=42`. A 200 with a populated `state` field proves
+   the full round-trip (forge webhook → bridge decode → translator →
+   bridge POST → real Plane decode → REST GET round-trip) — exactly
+   the path PFB-25 broke in production.
+7. Tears down on success or failure (`if: always()`).
+
+The `publish` job depends on `e2e-real-plane` succeeding, alongside
+`lint` and `e2e-docker`.
 
 ## Why these versions
 
@@ -48,15 +72,13 @@ drift them independently.
 ```bash
 # Bring the stack up + seed admin/workspace/project/token (~90s cold cache):
 bash test/e2e-docker/plane-ce/run.sh up
+# Last stdout line is JSON:
+# {"workspace_slug":"pfb-ci","project_id":"...","api_token":"...", ...}
 
-# The last stdout line is a JSON record with all the connection details:
-# {"workspace_slug": "pfb-ci", "project_id": "...", "api_token": "...", ...}
-
-# Source it into env vars and run the integration test:
-eval "$(bash test/e2e-docker/plane-ce/run.sh seed 2>/dev/null | tail -n1 \
-  | jq -r 'to_entries[] | "export PFB_PLANE_TEST_\(.key|ascii_upcase)=\(.value)"')"
-export PFB_PLANE_TEST_BASE_URL=http://localhost:8765/api/v1
-go test -tags=integration ./internal/plane -run TestIntegration -v
+# Inspect the seeded REST surface:
+TOKEN=<api_token from above>
+curl -H "X-API-Key: $TOKEN" \
+  http://localhost:8765/api/v1/workspaces/pfb-ci/projects/ | jq
 
 # Tear down:
 bash test/e2e-docker/plane-ce/run.sh down
@@ -65,6 +87,12 @@ bash test/e2e-docker/plane-ce/run.sh down
 The seed is idempotent — re-running it returns the same workspace,
 project, and token; pass `PFB_PLANE_API_KEY=<known-value>` to lock the
 token to a stable string (CI does this for log grep-ability).
+
+To exercise the full bridge round-trip locally, follow the same
+sequence the CI job does (compose up + seed → run bridge image with
+config pointing at `plane-api:8000` on the compose network → POST
+signed webhook → assert via REST). See the `e2e-real-plane` block in
+`.github/workflows/ci.yaml` for the exact commands.
 
 ### Podman wart
 
@@ -75,20 +103,19 @@ the in-image `/var/lib/rabbitmq/` (owned by uid 100). The compose pins
 `user: "100:101"` on the rabbitmq service to work around this. Docker
 (in CI) is unaffected either way.
 
-## CI integration
+Separately, rootless podman occasionally interprets `-v file:file`
+bind mounts as directories (the destination doesn't exist yet, so
+podman creates a directory at that path before the source is mounted).
+The Linux Docker daemon in GitHub Actions doesn't have this quirk;
+the e2e-real-plane CI job uses the same `-v config.yaml:...` pattern
+the existing e2e-docker job uses without issue.
 
-`.github/workflows/ci.yaml` defines an `e2e-real-plane` job that:
+## Why the healthcheck uses 127.0.0.1, not localhost
 
-1. Brings up this stack via `run.sh up`
-2. Sources the seed JSON into env vars
-3. Runs `go test -tags=integration ./internal/plane -run TestIntegration`
-4. Tears down via `run.sh down` (always — `if: always()`)
-
-The job is **separate from** the existing `e2e-docker` matrix to keep
-the marginal CI time scoped: real Plane boot is ~90s on a cold cache,
-and the value of running the integration test twice (once per forge
-flavor) is low — the wire shape doesn't depend on which forge is
-upstream.
+`plane-api` gunicorn binds `0.0.0.0:8000` (IPv4 only). On some rootless
+podman setups, `localhost` inside the container resolves to `::1`
+first, and the wget healthcheck gets ECONNREFUSED. `127.0.0.1` is
+unambiguous and works across Docker and Podman.
 
 ## Bootstrap details (seed.py)
 
@@ -111,12 +138,3 @@ directly through Django ORM:
 - `APIToken` with a known value (env override or random UUID hex)
 
 Every step is `get_or_create`, so the seed is safe to re-run.
-
-## Integration test coverage
-
-`internal/plane/integration_test.go` (build tag `integration`) calls
-every `plane.Client` method the bridge uses today and asserts the
-high-value fields decoded. The PFB-25 regression mode (REST `state`
-field as a bare UUID) is specifically pinned at the
-`CreateIssue` / `GetIssue` / `UpdateIssue` round-trip points, and
-PFB-27's external_source echo path is exercised on the create side.
